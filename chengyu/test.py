@@ -21,14 +21,14 @@ def test_single_chengyu(chengyu):
     
     # 获取URL
     print(f"正在获取 {chengyu} 的详情页面URL...")
-    url = get_chengyu_url(chengyu)
+    url = get_chengyu_url(chengyu, delay=0.5)
     
     if url:
         print(f"成功获取URL: {url}")
         
         # 提取详情
         print(f"正在爬取 {chengyu} 的详细信息...")
-        chengyu_data = extract_chengyu_details_from_url(url)
+        chengyu_data = extract_chengyu_details_from_url(url, delay=1)
         
         print("\n" + "="*60)
         print("爬取结果详情")
@@ -121,7 +121,7 @@ def test_random_chengyu_from_neo4j():
     # 从Neo4j获取成语列表
     print("正在从Neo4j获取成语列表...")
     try:
-        chengyu_list = get_idioms_from_neo4j(limit=50)  # 获取50个成语供随机选择
+        chengyu_list = get_idioms_from_neo4j(limit=100)  # 获取100个成语供随机选择
         if not chengyu_list:
             print("无法从Neo4j获取成语列表，使用预设成语")
             chengyu_list = ["一心一意", "三心二意", "画蛇添足", "守株待兔", "亡羊补牢"]

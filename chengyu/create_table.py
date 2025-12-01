@@ -24,7 +24,6 @@ def create_chengyu_table():
             url TEXT COMMENT '详情页面URL',
             pinyin VARCHAR(200) COMMENT '拼音',
             zhuyin VARCHAR(200) COMMENT '注音',
-            fanti VARCHAR(50) COMMENT '繁体字',
             emotion VARCHAR(50) COMMENT '感情色彩',
             explanation TEXT COMMENT '释义',
             source TEXT COMMENT '出处',

@@ -43,9 +43,15 @@ def get_idioms_from_neo4j(limit=None):
     return idiom_list
 
 
-def get_chengyu_url(chengyu):
-    """
-    获取成语详情页面的最终URL
+def get_chengyu_url(chengyu, delay=0.5):
+    """获取成语详情页面的最终URL，并做详情页有效性校验
+
+    Args:
+        chengyu: 成语字符串
+        delay: 请求延时时间（秒），默认0.5秒
+
+    Returns:
+        str | None: 成语详情页面URL，若未能定位到详情页则返回 None
     """
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -56,30 +62,45 @@ def get_chengyu_url(chengyu):
     search_url = f"https://www.hanyuguoxue.com/chengyu/search?words={urllib.parse.quote(chengyu)}"
 
     try:
+        # 防止被封IP，添加延时
+        if delay > 0:
+            time.sleep(delay)
+            
         response = requests.get(search_url, headers=headers, allow_redirects=True, timeout=10)
-        return response.url
-    except:
+        response.raise_for_status()
+
+        # 校验是否为成语详情页：
+        # 1. 页面包含成语标题 <h1>
+        # 2. 标题文本与待查询成语基本一致（去掉空白后相等）
+        html = response.text
+        soup = BeautifulSoup(html, 'html.parser')
+        title_element = soup.find('h1')
+        if title_element:
+            page_title = title_element.get_text(strip=True)
+            if page_title and page_title.replace(" ", "") == chengyu.replace(" ", ""):
+                return response.url
+
+        # 如果走到这里，说明当前 URL 不是明确的详情页，返回 None 交由上层记录为失败
+        print(f"未能在搜索结果中识别到成语 '{chengyu}' 的详情页，返回 None")
+        return None
+    except requests.exceptions.RequestException as e:
+        print(f"获取成语'{chengyu}'的URL失败: {str(e)}")
+        return None
+    except Exception as e:
+        print(f"获取成语'{chengyu}'的URL时发生未知错误: {str(e)}")
         return None
 
 
-def extract_chengyu_details_from_url(url):
+def extract_chengyu_details_from_html(html_content, url=None):
     """
-    从成语详情页面URL提取完整信息
+    从HTML内容中提取成语详细信息（不访问URL）
+    Args:
+        html_content: HTML内容字符串
+        url: 页面URL（可选，用于返回结果中）
+    Returns:
+        dict: 包含成语信息的字典
     """
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'zh-CN,zh;q=0.8,zh-TW;q=0.7,zh-HK;q=0.5,en-US;q=0.3,en;q=0.2',
-    }
-
     try:
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()
-        html_content = response.text
-        
-        # 防止被封IP，添加延时
-        time.sleep(1)
-        
         soup = BeautifulSoup(html_content, 'html.parser')
         
         result = {
@@ -126,6 +147,12 @@ def extract_chengyu_details_from_url(url):
                     synonyms_links = p.find_all('a')
                     synonyms = [link.get_text().strip() for link in synonyms_links]
                     result["data"]["synonyms"] = synonyms
+                
+                # 提取反义词
+                if '反义词' in p_text:
+                    antonyms_links = p.find_all('a')
+                    antonyms = [link.get_text().strip() for link in antonyms_links]
+                    result["data"]["antonyms"] = antonyms
         
         # 提取释义 - 从 ci-content div
         ci_content = soup.find('div', class_='ci-content')
@@ -172,27 +199,51 @@ def extract_chengyu_details_from_url(url):
                     translation_items.append(f"{language}: {translation_text}")
             result["data"]["translation"] = '; '.join(translation_items)
         
-        # 提取结构信息 - 从 ci-cards ul
-        ci_cards = soup.find('div', class_='ci-cards')
-        if ci_cards:
-            structure_info = {}
-            li_elements = ci_cards.find_all('li')
-            for li in li_elements:
-                span = li.find('span')
-                if span:
-                    key = span.get_text().strip()
-                    link = li.find('a')
-                    if link:
-                        value = link.get_text().strip()
-                        structure_info[key] = value
-            result["data"]["structure"] = structure_info
+        # 结构信息（如有需要可在此处解析，目前暂不使用，故不解析以避免冗余字段）
         
         return result
         
     except Exception as e:
         return {
             "url": url,
-            "error": str(e)
+            "error": f"HTML解析失败: {str(e)}"
+        }
+
+
+def extract_chengyu_details_from_url(url, delay=1):
+    """
+    从成语详情页面URL提取完整信息
+    Args:
+        url: 成语详情页面URL
+        delay: 请求延时时间（秒），默认1秒
+    """
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'zh-CN,zh;q=0.8,zh-TW;q=0.7,zh-HK;q=0.5,en-US;q=0.3,en;q=0.2',
+    }
+
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        html_content = response.text
+        
+        # 防止被封IP，添加延时
+        if delay > 0:
+            time.sleep(delay)
+        
+        # 使用HTML解析函数
+        return extract_chengyu_details_from_html(html_content, url)
+        
+    except requests.exceptions.RequestException as e:
+        return {
+            "url": url,
+            "error": f"网络请求失败: {str(e)}"
+        }
+    except Exception as e:
+        return {
+            "url": url,
+            "error": f"处理失败: {str(e)}"
         }
 
 
@@ -256,14 +307,13 @@ def save_chengyu_to_db(chengyu_data):
             data = chengyu_data.get('data', {})
             sql = """
             INSERT INTO hanyuguoxue_chengyu
-            (chengyu, url, pinyin, zhuyin, fanti, emotion, explanation, 
+            (chengyu, url, pinyin, zhuyin, emotion, explanation, 
              source, usage, example, synonyms, antonyms, translation)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE
             url = VALUES(url),
             pinyin = VALUES(pinyin),
             zhuyin = VALUES(zhuyin),
-            fanti = VALUES(fanti),
             emotion = VALUES(emotion),
             explanation = VALUES(explanation),
             source = VALUES(source),
@@ -279,7 +329,6 @@ def save_chengyu_to_db(chengyu_data):
                 chengyu_data.get('url', ''),
                 data.get('pinyin', ''),
                 data.get('zhuyin', ''),
-                data.get('fanti', ''),
                 data.get('emotion', ''),
                 data.get('explanation', ''),
                 data.get('source', ''),
@@ -301,18 +350,27 @@ def save_chengyu_to_db(chengyu_data):
         connection.close()
 
 
-def crawl_all_chengyu(limit=None, start_index=0):
+def crawl_all_chengyu(limit=None, start_index=0, request_delay=1, search_delay=0.5):
     """
     批量爬取所有成语数据
     Args:
         limit: 限制爬取数量，None表示爬取全部
         start_index: 开始索引，用于断点续爬
+        request_delay: 详情页面请求延时（秒），默认1秒
+        search_delay: 搜索页面请求延时（秒），默认0.5秒
     """
     # 注意：使用前请先运行 create_table.py 创建数据表
     
     # 获取成语列表
     print("正在从Neo4j获取成语列表...")
-    chengyu_list = get_idioms_from_neo4j(limit=None)  # 获取所有成语
+
+    # 让 limit 更符合直觉：
+    # - 当 start_index 为 0 且传入 limit 时，直接把 limit 透传给 Neo4j，减少不必要的数据拉取
+    # - 当需要从中间断点续爬时（start_index > 0），仍然一次性取出全部成语再在内存中切片
+    if start_index == 0 and limit:
+        chengyu_list = get_idioms_from_neo4j(limit=limit)
+    else:
+        chengyu_list = get_idioms_from_neo4j(limit=None)  # 获取所有成语
     
     if not chengyu_list:
         print("未获取到成语列表")
@@ -343,14 +401,14 @@ def crawl_all_chengyu(limit=None, start_index=0):
             print(f"【{i:4d}/{end_index}】正在爬取: {chengyu}")
             
             # 获取成语详情页面URL
-            url = get_chengyu_url(chengyu)
+            url = get_chengyu_url(chengyu, delay=search_delay)
             if not url:
                 print(f"  ❌ 无法获取 {chengyu} 的详情页面URL")
                 failed_crawls += 1
                 continue
             
             # 提取成语详情
-            chengyu_data = extract_chengyu_details_from_url(url)
+            chengyu_data = extract_chengyu_details_from_url(url, delay=request_delay)
             
             # 保存到数据库
             if save_chengyu_to_db(chengyu_data):
@@ -395,11 +453,14 @@ if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("用法: python hanyuguoxue.py [命令] [参数]")
         print("命令:")
-        print("  crawl [limit] [start_index] - 爬取成语数据")
+        print("  crawl [limit] [start_index] [request_delay] [search_delay] - 爬取成语数据")
         print("示例:")
-        print("  python hanyuguoxue.py crawl 10 0    # 爬取前10个成语")
-        print("  python hanyyuoxue.py crawl 100 50   # 从第51个开始爬取100个成语")
-        print("  python hanyuguoxue.py crawl          # 爬取所有成语")
+        print("  python hanyuguoxue.py crawl 10 0          # 爬取前10个成语（使用默认延时）")
+        print("  python hanyuguoxue.py crawl 100 50 2 1   # 从第51个开始爬取100个成语，请求延时2秒，搜索延时1秒")
+        print("  python hanyuguoxue.py crawl                # 爬取所有成语（使用默认延时）")
+        print("延时参数说明:")
+        print("  request_delay: 详情页面请求延时（秒），默认1秒")
+        print("  search_delay: 搜索页面请求延时（秒），默认0.5秒")
         sys.exit(1)
     
     command = sys.argv[1]
@@ -407,19 +468,30 @@ if __name__ == "__main__":
     if command == "crawl":
         limit = None
         start_index = 0
+        request_delay = 1
+        search_delay = 0.5
         
         if len(sys.argv) >= 3:
             limit = int(sys.argv[2])
         
         if len(sys.argv) >= 4:
             start_index = int(sys.argv[3])
+            
+        if len(sys.argv) >= 5:
+            request_delay = float(sys.argv[4])
+            
+        if len(sys.argv) >= 6:
+            search_delay = float(sys.argv[5])
         
-        print(f"🚀 开始爬取成语数据...")
+        print(f"开始爬取成语数据...")
         print(f"限制数量: {limit if limit else '全部'}")
         print(f"起始索引: {start_index}")
+        print(f"请求延时: {request_delay}秒")
+        print(f"搜索延时: {search_delay}秒")
         print("="*60)
         
-        crawl_all_chengyu(limit=limit, start_index=start_index)
+        crawl_all_chengyu(limit=limit, start_index=start_index, 
+                        request_delay=request_delay, search_delay=search_delay)
     else:
-        print(f"❌ 未知命令: {command}")
+        print(f"未知命令: {command}")
         sys.exit(1)
