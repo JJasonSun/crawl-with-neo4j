@@ -3,7 +3,7 @@
 创建成语数据表
 """
 import pymysql
-from hanyuguoxue import mysql_config, get_database_connection
+from hanyuguoxue_chengyu import mysql_config, get_database_connection
 
 def create_chengyu_table():
     """
