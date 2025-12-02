@@ -1,0 +1,92 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+.Python
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+.pytest_cache/
+
+# mypy
+.mypy_cache/
+
+# Pylint
+pylint-report.txt
+pylint-global.txt
+
+# IDEs and editors
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment variables / secrets
+.env
+.env.*
+secrets.env
+credentials.json
+
+# Logs and databases
+*.log
+*.sql
+*.sqlite
+*.sqlite3
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Node
+node_modules/
+
+# Local files (exported data, temporary)
+*.tmp
+*.temp
+*.bak
+*.swp
+
+# OneDrive/Windows specific
+~$*
+
+# Ignore compiled extensions
+*.so
+*.pyd
+
+# Coverage and profiling
+coverage.xml
+*.cover
+profile_stats
+
+# Archives
+*.zip
+*.tar.gz
+*.rar
+
+# Keep this file tracked
+!/.gitignore

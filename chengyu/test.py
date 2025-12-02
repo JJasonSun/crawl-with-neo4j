@@ -43,7 +43,6 @@ def test_single_chengyu(chengyu):
             print(f"成语: {data.get('chengyu', 'N/A')}")
             print(f"拼音: {data.get('pinyin', 'N/A')}")
             print(f"注音: {data.get('zhuyin', 'N/A')}")
-            print(f"繁体: {data.get('fanti', 'N/A')}")
             print(f"感情色彩: {data.get('emotion', 'N/A')}")
             
             # 详细信息
