@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""混合硬编码与 Neo4j 成语进行爬虫回归测试。"""
+"""
+本地测试脚本：批量爬取若干成语的详情页并打印结果。
+使用示例：
+    python test_chengyu.py
+"""
 
 import json
 import os
