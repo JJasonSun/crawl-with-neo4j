@@ -11,14 +11,19 @@
 import time
 import csv
 import os
-import argparse
 from chengyu_neo4j import get_idioms_from_neo4j
 from extract_chengyu import get_chengyu_url, extract_chengyu_details_from_url, save_chengyu_to_db
 
 CSV_PATH = os.path.join(os.path.dirname(__file__), 'batch_metrics.csv')
 
+# === 批量爬取的配置 ===
+DEFAULT_BATCH_SIZE = 1000 # 批量处理的成语数量
+DEFAULT_REQUEST_DELAY = 1.0 # 每个成语详情请求的延迟
+DEFAULT_SEARCH_DELAY = 0.5  # 搜索成语 URL 时的延迟
+# ==========================================
 
-def run_batch(batch_idx, idioms, request_delay=1, search_delay=0.5):
+
+def run_batch(batch_idx, idioms, request_delay=1.0, search_delay=0.5):
     start_time = time.perf_counter()
     processed = 0
     success = 0
@@ -86,7 +91,7 @@ def chunked(iterable, n):
         yield iterable[i:i+n]
 
 
-def main(batch_size=100, request_delay=1, search_delay=0.5):
+def main(batch_size=100, request_delay=1.0, search_delay=0.5):
     idioms = get_idioms_from_neo4j()
     if not idioms:
         print('未从 Neo4j 获取到成语列表，退出')
@@ -106,9 +111,7 @@ def main(batch_size=100, request_delay=1, search_delay=0.5):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--batch', type=int, default=100, help='每批大小，默认100')
-    parser.add_argument('--request-delay', type=float, default=1.0, help='详情页请求延时（秒）')
-    parser.add_argument('--search-delay', type=float, default=0.5, help='搜索页请求延时（秒）')
-    args = parser.parse_args()
-    exit(main(batch_size=args.batch, request_delay=args.request_delay, search_delay=args.search_delay))
+    # 直接使用文件顶部的默认常量，便于运行前手动修改
+    exit(main(batch_size=DEFAULT_BATCH_SIZE,
+              request_delay=DEFAULT_REQUEST_DELAY,
+              search_delay=DEFAULT_SEARCH_DELAY))

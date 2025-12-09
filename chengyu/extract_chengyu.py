@@ -175,7 +175,7 @@ def extract_chengyu_details_from_html(html_content, url=None):
         }
 
 
-def extract_chengyu_details_from_url(url, delay=1):
+def extract_chengyu_details_from_url(url, delay=1.0):
     """
     从成语详情页面URL提取完整信息
     Args:
