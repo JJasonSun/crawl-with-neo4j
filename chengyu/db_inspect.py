@@ -15,7 +15,7 @@
 from datetime import datetime
 from typing import Optional
 
-from hanyuguoxue_chengyu import get_database_connection, mysql_config
+from chengyu_mysql import get_database_connection, mysql_config
 
 
 def _now():

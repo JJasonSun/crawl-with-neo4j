@@ -12,7 +12,7 @@
 """
 import traceback
 import pymysql
-from hanyuguoxue_chengyu import get_database_connection
+from chengyu_mysql import get_database_connection
 
 
 CREATE_BASE_SQL = """

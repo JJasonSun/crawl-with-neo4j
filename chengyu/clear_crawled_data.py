@@ -14,7 +14,7 @@
 
 """
 
-from hanyuguoxue_chengyu import get_database_connection
+from chengyu_mysql import get_database_connection
 
 
 def main(interactive=True):

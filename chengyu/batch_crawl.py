@@ -4,12 +4,16 @@
 默认每批 100 条。结果会追加写入 chengyu/batch_metrics.csv。
 
 注意：这个脚本会实际请求网页并写入数据库，请确保你想现在执行完整爬取。
+
+使用示例：
+    python batch_crawl.py --batch 100 --request-delay 1.0 --search-delay 0.5
 """
 import time
 import csv
 import os
 import argparse
-from hanyuguoxue_chengyu import get_idioms_from_neo4j, get_chengyu_url, extract_chengyu_details_from_url, save_chengyu_to_db
+from chengyu_neo4j import get_idioms_from_neo4j
+from extract_chengyu import get_chengyu_url, extract_chengyu_details_from_url, save_chengyu_to_db
 
 CSV_PATH = os.path.join(os.path.dirname(__file__), 'batch_metrics.csv')
 

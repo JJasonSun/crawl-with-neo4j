@@ -4,43 +4,10 @@ import urllib.parse
 import time
 import json
 import re
-import pymysql
 from bs4 import BeautifulSoup
-from neo4j import GraphDatabase
 
-# Neo4j配置
-neo4j_config = {
-    "uri": "bolt://8.153.207.172:7687",
-    "user": "neo4j",
-    "password": "xtxzhu2u"
-}
+from chengyu_mysql import get_database_connection
 
-# MySQL数据库配置
-mysql_config = {
-    "host": "8.153.207.172",
-    "user": "root",
-    "password": "Restart1128",
-    "database": "lab_education",
-    "port": 3307
-}
-
-def get_idioms_from_neo4j(limit=None):
-    """
-    从Neo4j数据库获取成语列表
-    """
-    driver = GraphDatabase.driver(neo4j_config["uri"], auth=(neo4j_config["user"], neo4j_config["password"]))
-    idiom_list = []
-    with driver.session() as session:
-        if limit:
-            query = "MATCH (n:Idiom) RETURN n.name AS name LIMIT $limit"
-            result = session.run(query, limit=limit)
-        else:
-            query = "MATCH (n:Idiom) RETURN n.name AS name"
-            result = session.run(query)
-        for record in result:
-            idiom_list.append(record["name"])
-    driver.close()
-    return idiom_list
 
 
 def get_chengyu_url(chengyu, delay=0.5):
@@ -245,29 +212,6 @@ def extract_chengyu_details_from_url(url, delay=1):
         }
 
 
-def get_database_connection():
-    """
-    获取MySQL数据库连接
-    """
-    try:
-        connection = pymysql.connect(
-            host=mysql_config["host"],
-            user=mysql_config["user"],
-            password=mysql_config["password"],
-            database=mysql_config["database"],
-            port=mysql_config["port"],
-            charset="utf8mb4",
-            cursorclass=pymysql.cursors.DictCursor
-        )
-        return connection
-    except Exception as e:
-        print(f"数据库连接失败: {e}")
-        return None
-
-
-
-
-
 def save_chengyu_to_db(chengyu_data):
     """
     将成语数据保存到数据库
@@ -407,122 +351,3 @@ def save_chengyu_to_db(chengyu_data):
         return False
     finally:
         connection.close()
-
-
-def crawl_all_chengyu(limit=None, start_index=0, request_delay=1, search_delay=0.5):
-    """
-    批量爬取所有成语数据
-    Args:
-        limit: 限制爬取数量，None表示爬取全部
-        start_index: 开始索引，用于断点续爬
-        request_delay: 详情页面请求延时（秒），默认1秒
-        search_delay: 搜索页面请求延时（秒），默认0.5秒
-    """
-
-    
-    # 获取成语列表
-    print("正在从Neo4j获取成语列表...")
-
-    # 让 limit 更符合直觉：
-    # - 当 start_index 为 0 且传入 limit 时，直接把 limit 透传给 Neo4j，减少不必要的数据拉取
-    # - 当需要从中间断点续爬时（start_index > 0），仍然一次性取出全部成语再在内存中切片
-    if start_index == 0 and limit:
-        chengyu_list = get_idioms_from_neo4j(limit=limit)
-    else:
-        chengyu_list = get_idioms_from_neo4j(limit=None)  # 获取所有成语
-    
-    if not chengyu_list:
-        print("未获取到成语列表")
-        return
-    
-    total_chengyu = len(chengyu_list)
-    print(f"共获取到 {total_chengyu} 个成语")
-    
-    # 应用限制和起始索引
-    if start_index >= total_chengyu:
-        print(f"起始索引 {start_index} 超出范围，总成语数: {total_chengyu}")
-        return
-    
-    end_index = total_chengyu
-    if limit:
-        end_index = min(start_index + limit, total_chengyu)
-    
-    chengyu_list = chengyu_list[start_index:end_index]
-    
-    successful_crawls = 0
-    failed_crawls = 0
-    
-    print(f"开始爬取成语，范围: {start_index+1}-{end_index}/{total_chengyu}")
-    print("=" * 60)
-    
-    for i, chengyu in enumerate(chengyu_list, start=start_index + 1):
-        try:
-            print(f"【{i:4d}/{end_index}】正在爬取: {chengyu}")
-            
-            # 获取成语详情页面URL
-            url = get_chengyu_url(chengyu, delay=search_delay)
-            if not url:
-                print(f"  ❌ 无法获取 {chengyu} 的详情页面URL")
-                failed_crawls += 1
-                continue
-            
-            # 提取成语详情
-            chengyu_data = extract_chengyu_details_from_url(url, delay=request_delay)
-            
-            # 保存到数据库
-            if save_chengyu_to_db(chengyu_data):
-                successful_crawls += 1
-                print(f"  ✅ 成功保存: {chengyu}")
-                
-                # 显示部分信息
-                if 'data' in chengyu_data:
-                    data = chengyu_data['data']
-                    if 'pinyin' in data:
-                        print(f"    拼音: {data['pinyin']}")
-                    if 'emotion' in data:
-                        print(f"    感情: {data['emotion']}")
-                    if 'synonyms' in data and data['synonyms']:
-                        print(f"    近义词: {', '.join(data['synonyms'][:3])}{'...' if len(data['synonyms']) > 3 else ''}")
-                    if 'antonyms' in data and data['antonyms']:
-                        print(f"    反义词: {', '.join(data['antonyms'][:3])}{'...' if len(data['antonyms']) > 3 else ''}")
-            else:
-                failed_crawls += 1
-                print(f"  ❌ 保存失败: {chengyu}")
-            
-            # 每处理10个成语显示一次进度
-            if i % 10 == 0:
-                progress = i / end_index * 100
-                print(f"进度: {progress:.1f}% (成功: {successful_crawls}, 失败: {failed_crawls})")
-            
-        except Exception as e:
-            failed_crawls += 1
-            print(f"  ❌ 爬取 {chengyu} 时发生错误: {e}")
-            continue
-    
-    print("=" * 60)
-    print(f"爬取完成！")
-    print(f"处理成语数: {end_index - start_index}")
-    print(f"成功爬取: {successful_crawls}")
-    print(f"失败爬取: {failed_crawls}")
-    print(f"成功率: {successful_crawls/(successful_crawls+failed_crawls)*100:.2f}%" if (successful_crawls+failed_crawls) > 0 else "0%")
-
-if __name__ == "__main__":
-    import sys
-    
-    # 使用默认参数，支持断点续爬
-    start_index = 0
-    request_delay = 1
-    search_delay = 0.5
-    
-    # 如果提供了起始索引参数，则从指定位置开始爬取
-    if len(sys.argv) >= 2:
-        start_index = int(sys.argv[1])
-    
-    print(f"开始爬取成语数据...")
-    print(f"起始索引: {start_index}")
-    print(f"请求延时: {request_delay}秒")
-    print(f"搜索延时: {search_delay}秒")
-    print("="*60)
-    
-    crawl_all_chengyu(limit=5, start_index=start_index, 
-                    request_delay=request_delay, search_delay=search_delay)

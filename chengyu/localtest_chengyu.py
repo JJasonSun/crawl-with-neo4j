@@ -2,7 +2,7 @@
 """
 本地测试脚本：批量爬取若干成语的详情页并打印结果。
 使用示例：
-    python test_chengyu.py
+    python localtest_chengyu.py
 """
 
 import json
@@ -12,11 +12,11 @@ import sys
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from hanyuguoxue_chengyu import (
+from extract_chengyu import (
     extract_chengyu_details_from_url,
     get_chengyu_url,
-    get_idioms_from_neo4j,
 )
+from chengyu_neo4j import get_idioms_from_neo4j
 
 COMMON_CHENGYU = [
     "一心一意",
