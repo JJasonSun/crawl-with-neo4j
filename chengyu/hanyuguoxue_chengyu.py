@@ -199,8 +199,6 @@ def extract_chengyu_details_from_html(html_content, url=None):
                     translation_items.append(f"{language}: {translation_text}")
             result["data"]["translation"] = '; '.join(translation_items)
         
-        # 结构信息（如有需要可在此处解析，目前暂不使用，故不解析以避免冗余字段）
-        
         return result
         
     except Exception as e:
@@ -359,7 +357,7 @@ def crawl_all_chengyu(limit=None, start_index=0, request_delay=1, search_delay=0
         request_delay: 详情页面请求延时（秒），默认1秒
         search_delay: 搜索页面请求延时（秒），默认0.5秒
     """
-    # 注意：使用前请先运行 create_table.py 创建数据表
+
     
     # 获取成语列表
     print("正在从Neo4j获取成语列表...")
@@ -450,48 +448,20 @@ def crawl_all_chengyu(limit=None, start_index=0, request_delay=1, search_delay=0
 if __name__ == "__main__":
     import sys
     
-    if len(sys.argv) < 2:
-        print("用法: python hanyuguoxue.py [命令] [参数]")
-        print("命令:")
-        print("  crawl [limit] [start_index] [request_delay] [search_delay] - 爬取成语数据")
-        print("示例:")
-        print("  python hanyuguoxue.py crawl 10 0          # 爬取前10个成语（使用默认延时）")
-        print("  python hanyuguoxue.py crawl 100 50 2 1   # 从第51个开始爬取100个成语，请求延时2秒，搜索延时1秒")
-        print("  python hanyuguoxue.py crawl                # 爬取所有成语（使用默认延时）")
-        print("延时参数说明:")
-        print("  request_delay: 详情页面请求延时（秒），默认1秒")
-        print("  search_delay: 搜索页面请求延时（秒），默认0.5秒")
-        sys.exit(1)
+    # 使用默认参数，支持断点续爬
+    start_index = 0
+    request_delay = 1
+    search_delay = 0.5
     
-    command = sys.argv[1]
+    # 如果提供了起始索引参数，则从指定位置开始爬取
+    if len(sys.argv) >= 2:
+        start_index = int(sys.argv[1])
     
-    if command == "crawl":
-        limit = None
-        start_index = 0
-        request_delay = 1
-        search_delay = 0.5
-        
-        if len(sys.argv) >= 3:
-            limit = int(sys.argv[2])
-        
-        if len(sys.argv) >= 4:
-            start_index = int(sys.argv[3])
-            
-        if len(sys.argv) >= 5:
-            request_delay = float(sys.argv[4])
-            
-        if len(sys.argv) >= 6:
-            search_delay = float(sys.argv[5])
-        
-        print(f"开始爬取成语数据...")
-        print(f"限制数量: {limit if limit else '全部'}")
-        print(f"起始索引: {start_index}")
-        print(f"请求延时: {request_delay}秒")
-        print(f"搜索延时: {search_delay}秒")
-        print("="*60)
-        
-        crawl_all_chengyu(limit=limit, start_index=start_index, 
-                        request_delay=request_delay, search_delay=search_delay)
-    else:
-        print(f"未知命令: {command}")
-        sys.exit(1)
+    print(f"开始爬取成语数据...")
+    print(f"起始索引: {start_index}")
+    print(f"请求延时: {request_delay}秒")
+    print(f"搜索延时: {search_delay}秒")
+    print("="*60)
+    
+    crawl_all_chengyu(limit=None, start_index=start_index, 
+                    request_delay=request_delay, search_delay=search_delay)

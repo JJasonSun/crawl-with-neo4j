@@ -21,7 +21,7 @@ COMMON_WORDS = [
     "学习",
     "努力",
 ]
-NEO4J_LIMIT = 5
+NEO4J_LIMIT = 45
 
 
 def print_ciyu_data(ciyu_data: dict) -> None:
@@ -54,48 +54,58 @@ def print_ciyu_data(ciyu_data: dict) -> None:
 
 
 def collect_candidates(limit: int) -> list[str]:
+    """返回 5 个硬编码词语加上从 Neo4j 拉取的候选，按实际数量拼接。"""
+    candidates = COMMON_WORDS.copy()
+    seen = set(candidates)
+
     try:
         neo4j_words = get_words_from_neo4j(limit=limit)
-        if neo4j_words:
-            print(f"🧠 Neo4j 拉取到 {len(neo4j_words)} 个备选词语")
-        else:
-            print("⚠️ Neo4j 未返回词语，只有硬编码词汇可用")
+        print(f"Neo4j 拉取到 {len(neo4j_words)} 个候选词语")
     except Exception as exc:  # pragma: no cover - best effort
-        print(f"⚠️ Neo4j 获取词语失败: {exc}")
+        print(f"Neo4j 获取词语失败: {exc}")
         neo4j_words = []
 
-    seen = set()
-    combined = []
-    for source in (COMMON_WORDS, neo4j_words):
-        for word in source:
-            if word and word not in seen:
-                seen.add(word)
-                combined.append(word)
+    for word in neo4j_words:
+        if word and word not in seen:
+            candidates.append(word)
+            seen.add(word)
 
-    return combined or COMMON_WORDS[:]
+    return candidates
 
 
-def run_test(word: str) -> None:
-    print("=" * 60)
-    print(f"测试词语: {word}")
-    print("=" * 60)
+def crawl_all(candidates: list[str], inter_delay: float = 1.0) -> None:
+    """对候选词语列表逐个爬取，使用显式传参 + inter_delay。"""
+    import time
+    
+    for idx, word in enumerate(candidates, start=1):
+        print("=" * 60)
+        print(f"[{idx}/{len(candidates)}] 爬取: {word}")
+        print("=" * 60)
 
-    url = get_ciyu_url(word)
-    if not url:
-        print(f"无法获取 {word} 的详情页 URL")
-        return
+        url = get_ciyu_url(word, delay=0.5)
+        if not url:
+            print(f"无法获取 {word} 的详情页 URL")
+            # 即使获取失败也要保持延时节奏
+            if idx < len(candidates):
+                print(f"等待 {inter_delay} 秒后继续下一个...")
+                time.sleep(inter_delay)
+            continue
 
-    print(f"详情页 URL: {url}")
-    details = extract_ciyu_details_from_url(url)
-    print_ciyu_data(details)
-    print("\nJSON 数据:")
-    print(json.dumps(details, ensure_ascii=False, indent=2))
+        details = extract_ciyu_details_from_url(url, delay=1.0)
+        print_ciyu_data(details)
+        print("\n完整 JSON 数据:")
+        print(json.dumps(details, ensure_ascii=False, indent=2))
+        
+        # 显式控制项间延时
+        if idx < len(candidates):  # 最后一项不需要延时
+            print(f"等待 {inter_delay} 秒后继续下一个...")
+            time.sleep(inter_delay)
 
 
 def main() -> None:
     candidates = collect_candidates(limit=NEO4J_LIMIT)
-    choice = random.choice(candidates)
-    run_test(choice)
+    print(f"候选数: {len(candidates)}（5个硬编码 + {len(candidates)-5}个Neo4j），开始批量爬取...")
+    crawl_all(candidates, inter_delay=1.0)
 
 
 if __name__ == "__main__":

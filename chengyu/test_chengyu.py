@@ -21,7 +21,7 @@ COMMON_CHENGYU = [
     "画蛇添足",
     "亡羊补牢",
 ]
-NEO4J_LIMIT = 5
+NEO4J_LIMIT = 45
 
 
 def print_chengyu_data(chengyu_data: dict) -> None:
@@ -54,48 +54,58 @@ def print_chengyu_data(chengyu_data: dict) -> None:
 
 
 def collect_candidates(limit: int) -> list[str]:
+    """返回 5 个硬编码成语加上从 Neo4j 拉取的候选，按实际数量拼接。"""
+    candidates = COMMON_CHENGYU.copy()
+    seen = set(candidates)
+
     try:
         neo4j_idioms = get_idioms_from_neo4j(limit=limit)
-        if neo4j_idioms:
-            print(f"🧠 Neo4j 拉取到 {len(neo4j_idioms)} 个候选成语")
-        else:
-            print("⚠️ Neo4j 未返回成语，仅使用硬编码列表")
+        print(f"Neo4j 拉取到 {len(neo4j_idioms)} 个候选成语")
     except Exception as exc:  # pragma: no cover - best effort
-        print(f"⚠️ Neo4j 获取成语失败: {exc}")
+        print(f"Neo4j 获取成语失败: {exc}")
         neo4j_idioms = []
 
-    seen = set()
-    combined = []
-    for source in (COMMON_CHENGYU, neo4j_idioms):
-        for item in source:
-            if item and item not in seen:
-                seen.add(item)
-                combined.append(item)
+    for idiom in neo4j_idioms:
+        if idiom and idiom not in seen:
+            candidates.append(idiom)
+            seen.add(idiom)
 
-    return combined or COMMON_CHENGYU[:]
+    return candidates
 
 
-def run_test(chengyu: str) -> None:
-    print("=" * 60)
-    print(f"测试成语: {chengyu}")
-    print("=" * 60)
+def crawl_all(candidates: list[str], inter_delay: float = 2.0) -> None:
+    """对候选成语列表逐个爬取，使用显式传参 + inter_delay。"""
+    import time
+    
+    for idx, ch in enumerate(candidates, start=1):
+        print("=" * 60)
+        print(f"[{idx}/{len(candidates)}] 爬取: {ch}")
+        print("=" * 60)
 
-    url = get_chengyu_url(chengyu)
-    if not url:
-        print(f"无法获取 {chengyu} 的详情页 URL")
-        return
+        url = get_chengyu_url(ch, delay=0.5)
+        if not url:
+            print(f"无法获取 {ch} 的详情页 URL")
+            # 即使获取失败也要保持延时节奏
+            if idx < len(candidates):
+                print(f"等待 {inter_delay} 秒后继续下一个...")
+                time.sleep(inter_delay)
+            continue
 
-    print(f"详情页 URL: {url}")
-    details = extract_chengyu_details_from_url(url)
-    print_chengyu_data(details)
-    print("\n完整 JSON 数据:")
-    print(json.dumps(details, ensure_ascii=False, indent=2))
+        details = extract_chengyu_details_from_url(url, delay=1)
+        print_chengyu_data(details)
+        print("\n完整 JSON 数据:")
+        print(json.dumps(details, ensure_ascii=False, indent=2))
+        
+        # 显式控制项间延时
+        if idx < len(candidates):  # 最后一项不需要延时
+            print(f"等待 {inter_delay} 秒后继续下一个...")
+            time.sleep(inter_delay)
 
 
 def main() -> None:
     candidates = collect_candidates(limit=NEO4J_LIMIT)
-    choice = random.choice(candidates)
-    run_test(choice)
+    print(f"候选数: {len(candidates)}（5个硬编码 + {len(candidates)-5}个Neo4j），开始批量爬取...")
+    crawl_all(candidates, inter_delay=1.0)
 
 
 if __name__ == "__main__":
