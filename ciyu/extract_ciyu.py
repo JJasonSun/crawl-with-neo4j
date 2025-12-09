@@ -6,53 +6,10 @@ import time
 import urllib.parse
 from typing import Dict, List, Optional
 
-import pymysql
 import requests
-from bs4 import BeautifulSoup
-from neo4j import GraphDatabase
-
-# ========================
-# 数据库配置
-# ========================
-neo4j_config = {
-    "uri": "bolt://8.153.207.172:7687",
-    "user": "neo4j",
-    "password": "xtxzhu2u",
-}
-
-mysql_config = {
-    "host": "8.153.207.172",
-    "user": "root",
-    "password": "Restart1128",
-    "database": "lab_education",
-    "port": 3307,
-}
-
-
-# ========================
-# Neo4j 读取词语列表
-# ========================
-def get_words_from_neo4j(limit: Optional[int] = None) -> List[str]:
-    """从 Neo4j 获取词语（Word 节点）。"""
-    driver = GraphDatabase.driver(
-        neo4j_config["uri"],
-        auth=(neo4j_config["user"], neo4j_config["password"]),
-    )
-    words: List[str] = []
-    try:
-        with driver.session() as session:
-            if limit:
-                query = "MATCH (n:Word) RETURN n.name AS name LIMIT $limit"
-                result = session.run(query, limit=limit)
-            else:
-                query = "MATCH (n:Word) RETURN n.name AS name"
-                result = session.run(query)
-            for record in result:
-                if record["name"]:
-                    words.append(record["name"])
-    finally:
-        driver.close()
-    return words
+from bs4 import BeautifulSoup, Tag
+from ciyu_mysql import get_database_connection, TEST_MODE, save_ciyu_to_db
+from ciyu_neo4j import get_words_from_neo4j
 
 
 # ========================
@@ -100,10 +57,10 @@ def get_ciyu_url(word: str, delay: float = 0.5) -> Optional[str]:
 # ========================
 # HTML 解析
 # ========================
-def _extract_list_from_label(ci_attrs: Optional[BeautifulSoup], label_text: str) -> List[str]:
+def _extract_list_from_label(ci_attrs: Optional[Tag], label_text: str) -> List[str]:
     if not ci_attrs:
         return []
-    label = ci_attrs.find("label", string=label_text)
+    label = ci_attrs.find("label", string=label_text)  # type: ignore
     if not label:
         return []
     container = label.parent
@@ -142,19 +99,19 @@ def extract_ciyu_details_from_html(html_content: str, url: Optional[str] = None)
         ci_attrs = soup.find("div", class_="ci-attrs")
         if ci_attrs:
             # 拼音 (更稳定)
-            pinyin_label = ci_attrs.find("label", string="拼音")
+            pinyin_label = ci_attrs.find("label", string="拼音")  # type: ignore
             if pinyin_label:
                 pinyin_span = pinyin_label.find_next_sibling("span")
                 if pinyin_span:
                     data["pinyin"] = pinyin_span.get_text(strip=True)
 
-            zhuyin_label = ci_attrs.find("label", string="注音")
+            zhuyin_label = ci_attrs.find("label", string="注音")  # type: ignore
             if zhuyin_label:
                 zhuyin_span = zhuyin_label.find_next_sibling("span")
                 if zhuyin_span:
                     data["zhuyin"] = zhuyin_span.get_text(strip=True)
 
-            pos_label = ci_attrs.find("label", string="词性")
+            pos_label = ci_attrs.find("label", string="词性")  # type: ignore
             if pos_label:
                 pos_span = pos_label.find_next_sibling("span")
                 if pos_span:
@@ -164,7 +121,7 @@ def extract_ciyu_details_from_html(html_content: str, url: Optional[str] = None)
             data["antonyms"] = _extract_list_from_label(ci_attrs, "反义词")
 
         # 网络解释作为主释义
-        network_heading = soup.find("h3", string="网络解释")
+        network_heading = soup.find("h3", string="网络解释")  # type: ignore
         if network_heading:
             content_block = network_heading.parent.find_next_sibling("div")
             if content_block:
@@ -202,86 +159,6 @@ def extract_ciyu_details_from_url(url: str, delay: float = 1.0) -> Dict:
         return {"url": url, "error": f"网络请求失败: {exc}"}
     except Exception as exc:  # noqa: BLE001
         return {"url": url, "error": f"处理失败: {exc}"}
-
-
-# ========================
-# MySQL 读写
-# ========================
-def get_database_connection():
-    try:
-        return pymysql.connect(
-            host=mysql_config["host"],
-            user=mysql_config["user"],
-            password=mysql_config["password"],
-            database=mysql_config["database"],
-            port=mysql_config["port"],
-            charset="utf8mb4",
-            cursorclass=pymysql.cursors.DictCursor,
-        )
-    except Exception as exc:  # noqa: BLE001
-        print(f"数据库连接失败: {exc}")
-        return None
-
-
-def save_ciyu_to_db(ciyu_data: Dict) -> bool:
-    """将解析结果写入 MySQL。"""
-    connection = get_database_connection()
-    if not connection:
-        return False
-
-    try:
-        cursor = connection.cursor()
-        data = ciyu_data.get("data", {})
-        word = data.get("word", "")
-
-        if "error" in ciyu_data:
-            sql = (
-                "INSERT INTO hanyuguoxue_ciyu (word, url, error) "
-                "VALUES (%s, %s, %s) "
-                "ON DUPLICATE KEY UPDATE url = VALUES(url), error = VALUES(error), "
-                "updated_at = CURRENT_TIMESTAMP"
-            )
-            cursor.execute(sql, (word, ciyu_data.get("url", ""), ciyu_data["error"]))
-        else:
-            sql = (
-                "INSERT INTO hanyuguoxue_ciyu "
-                "(word, url, pinyin, zhuyin, part_of_speech, is_common, "
-                "definition, synonyms, antonyms) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) "
-                "ON DUPLICATE KEY UPDATE "
-                "url = VALUES(url), "
-                "pinyin = VALUES(pinyin), "
-                "zhuyin = VALUES(zhuyin), "
-                "part_of_speech = VALUES(part_of_speech), "
-                "is_common = VALUES(is_common), "
-                "definition = VALUES(definition), "
-                "synonyms = VALUES(synonyms), "
-                "antonyms = VALUES(antonyms), "
-                "updated_at = CURRENT_TIMESTAMP"
-            )
-            cursor.execute(
-                sql,
-                (
-                    word,
-                    ciyu_data.get("url", ""),
-                    data.get("pinyin", ""),
-                    data.get("zhuyin", ""),
-                    data.get("part_of_speech", ""),
-                    int(bool(data.get("is_common"))),
-                    data.get("definition", ""),
-                    json.dumps(data.get("synonyms", []), ensure_ascii=False),
-                    json.dumps(data.get("antonyms", []), ensure_ascii=False),
-                ),
-            )
-
-        connection.commit()
-        return True
-    except Exception as exc:  # noqa: BLE001
-        print(f"保存词语数据失败: {exc}")
-        connection.rollback()
-        return False
-    finally:
-        connection.close()
 
 
 # ========================

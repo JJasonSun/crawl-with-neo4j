@@ -1,54 +1,56 @@
 # -*- coding: utf-8 -*-
 """
-分批爬取成语并记录每批性能指标（耗时、插入速率、错误率）。
-默认每批 100 条。结果会追加写入 chengyu/batch_metrics.csv。
+分批爬取词语并记录每批性能指标（耗时、插入速率、错误率）。
+结果会追加写入 ciyu/batch_metrics.csv。
 
-注意：这个脚本会实际请求网页并写入数据库，请确保你想现在执行完整爬取。
-
-使用示例：
-    python batch_crawl.py --batch 100 --request-delay 1.0 --search-delay 0.5
+使用：在文件顶部修改 DEFAULT_* 常量后直接运行
+    python batch_crawl.py
 """
 import time
 import csv
 import os
-from chengyu_neo4j import get_idioms_from_neo4j
-from extract_chengyu import get_chengyu_url, extract_chengyu_details_from_url
-from chengyu_mysql import save_chengyu_to_db
+
+from extract_ciyu import (
+    get_words_from_neo4j,
+    get_ciyu_url,
+    extract_ciyu_details_from_url,
+)
+from ciyu_mysql import save_ciyu_to_db
 
 CSV_PATH = os.path.join(os.path.dirname(__file__), 'batch_metrics.csv')
 
-# === 批量爬取的配置 ===
-DEFAULT_BATCH_SIZE = 1000 # 批量处理的成语数量
-DEFAULT_REQUEST_DELAY = 1.0 # 每个成语详情请求的延迟
-DEFAULT_SEARCH_DELAY = 0.5  # 搜索成语 URL 时的延迟
-# ==========================================
+# === 配置（直接在这里修改） ===
+DEFAULT_BATCH_SIZE = 1000
+DEFAULT_REQUEST_DELAY = 1.0
+DEFAULT_SEARCH_DELAY = 0.5
+# ==============================
 
 
-def run_batch(batch_idx, idioms, request_delay=1.0, search_delay=0.5):
+def run_batch(batch_idx, words, request_delay=1.0, search_delay=0.5):
     start_time = time.perf_counter()
     processed = 0
     success = 0
     fail = 0
     errors = []
 
-    for chengyu in idioms:
+    for w in words:
         processed += 1
         try:
-            url = get_chengyu_url(chengyu, delay=search_delay)
+            url = get_ciyu_url(w, delay=search_delay)
             if not url:
                 fail += 1
-                errors.append((chengyu, 'no_url'))
+                errors.append((w, 'no_url'))
                 continue
-            data = extract_chengyu_details_from_url(url, delay=request_delay)
-            ok = save_chengyu_to_db(data)
+            data = extract_ciyu_details_from_url(url, delay=request_delay)
+            ok = save_ciyu_to_db(data)
             if ok:
                 success += 1
             else:
                 fail += 1
-                errors.append((chengyu, 'save_failed'))
+                errors.append((w, 'save_failed'))
         except Exception as e:
             fail += 1
-            errors.append((chengyu, str(e)))
+            errors.append((w, str(e)))
 
     elapsed = time.perf_counter() - start_time
     insert_rate = success / elapsed if elapsed > 0 else 0
@@ -56,8 +58,8 @@ def run_batch(batch_idx, idioms, request_delay=1.0, search_delay=0.5):
 
     metrics = {
         'batch_idx': batch_idx,
-        'start': batch_idx * len(idioms) + 1,
-        'end': batch_idx * len(idioms) + len(idioms),
+        'start': batch_idx * len(words) + 1,
+        'end': batch_idx * len(words) + len(words),
         'processed': processed,
         'success': success,
         'fail': fail,
@@ -67,7 +69,6 @@ def run_batch(batch_idx, idioms, request_delay=1.0, search_delay=0.5):
         'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
     }
 
-    # append metrics to CSV
     write_header = not os.path.exists(CSV_PATH)
     with open(CSV_PATH, 'a', encoding='utf-8-sig', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=list(metrics.keys()))
@@ -75,12 +76,11 @@ def run_batch(batch_idx, idioms, request_delay=1.0, search_delay=0.5):
             writer.writeheader()
         writer.writerow(metrics)
 
-    # also write batch error details file if there are errors
     if errors:
         err_path = os.path.join(os.path.dirname(__file__), f'batch_{batch_idx}_errors.csv')
         with open(err_path, 'w', encoding='utf-8-sig', newline='') as ef:
             ew = csv.writer(ef)
-            ew.writerow(['chengyu', 'error'])
+            ew.writerow(['word', 'error'])
             for e in errors:
                 ew.writerow(e)
 
@@ -93,15 +93,15 @@ def chunked(iterable, n):
 
 
 def main(batch_size=100, request_delay=1.0, search_delay=0.5):
-    idioms = get_idioms_from_neo4j()
-    if not idioms:
-        print('未从 Neo4j 获取到成语列表，退出')
+    words = get_words_from_neo4j()
+    if not words:
+        print('未从 Neo4j 获取到词语列表，退出')
         return 2
-    total = len(idioms)
-    print(f'获取到 {total} 个成语，分批大小: {batch_size}')
+    total = len(words)
+    print(f'获取到 {total} 个词语，分批大小: {batch_size}')
 
     batch_idx = 0
-    for chunk in chunked(idioms, batch_size):
+    for chunk in chunked(words, batch_size):
         print(f'开始第 {batch_idx} 批: {batch_idx*batch_size+1}-{min((batch_idx+1)*batch_size, total)}')
         m = run_batch(batch_idx, chunk, request_delay=request_delay, search_delay=search_delay)
         print('  批次指标:', m)
@@ -112,7 +112,6 @@ def main(batch_size=100, request_delay=1.0, search_delay=0.5):
 
 
 if __name__ == '__main__':
-    # 直接使用文件顶部的默认常量，便于运行前手动修改
     exit(main(batch_size=DEFAULT_BATCH_SIZE,
               request_delay=DEFAULT_REQUEST_DELAY,
               search_delay=DEFAULT_SEARCH_DELAY))
