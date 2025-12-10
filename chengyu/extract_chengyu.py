@@ -7,7 +7,7 @@ from bs4 import BeautifulSoup
 
 
 
-def get_chengyu_url(chengyu, delay=0.5):
+def get_chengyu_url(chengyu, delay=0.5, session=None):
     """获取成语详情页面的最终URL，并做详情页有效性校验
 
     Args:
@@ -26,11 +26,15 @@ def get_chengyu_url(chengyu, delay=0.5):
     search_url = f"https://www.hanyuguoxue.com/chengyu/search?words={urllib.parse.quote(chengyu)}"
 
     try:
-        # 防止被封IP，添加延时
+        # 防止被封IP，添加延时（可由调用方控制抖动）
         if delay > 0:
             time.sleep(delay)
-            
-        response = requests.get(search_url, headers=headers, allow_redirects=True, timeout=10)
+
+        sess = session or requests
+        response = sess.get(search_url, headers=headers, allow_redirects=True, timeout=10)
+        # if blocked/limited by server (status codes commonly used for rate limiting/WAF)
+        if response.status_code in (429, 403, 503):
+            return {'blocked': response.status_code, 'body': response.text[:500]}
         response.raise_for_status()
 
         # 校验是否为成语详情页：
@@ -49,10 +53,10 @@ def get_chengyu_url(chengyu, delay=0.5):
         return None
     except requests.exceptions.RequestException as e:
         print(f"获取成语'{chengyu}'的URL失败: {str(e)}")
-        return None
+        return {'error': str(e)}
     except Exception as e:
         print(f"获取成语'{chengyu}'的URL时发生未知错误: {str(e)}")
-        return None
+        return {'error': str(e)}
 
 
 def extract_chengyu_details_from_html(html_content, url=None):
@@ -172,7 +176,7 @@ def extract_chengyu_details_from_html(html_content, url=None):
         }
 
 
-def extract_chengyu_details_from_url(url, delay=1.0):
+def extract_chengyu_details_from_url(url, delay=1.0, session=None):
     """
     从成语详情页面URL提取完整信息
     Args:
@@ -186,14 +190,23 @@ def extract_chengyu_details_from_url(url, delay=1.0):
     }
 
     try:
-        response = requests.get(url, headers=headers, timeout=10)
+        sess = session or requests
+        response = sess.get(url, headers=headers, timeout=10)
+        # detect blocked status
+        if response.status_code in (429, 403, 503):
+            return {
+                'url': url,
+                'error': 'blocked',
+                'status': response.status_code,
+                'body': response.text[:500]
+            }
         response.raise_for_status()
         html_content = response.text
-        
-        # 防止被封IP，添加延时
+
+        # 防止被封IP，添加延时（可由调用方控制抖动）
         if delay > 0:
             time.sleep(delay)
-        
+
         # 使用HTML解析函数
         return extract_chengyu_details_from_html(html_content, url)
         

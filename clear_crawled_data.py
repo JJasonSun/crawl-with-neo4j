@@ -16,7 +16,7 @@ import importlib
 #  - chengyu -> ['chengyu_relation', 'hanyuguoxue_chengyu']
 #  - ciyu   -> ['ciyu_relation', 'hanyuguoxue_ciyu']
 # 为了确保能清空父表，脚本**会始终禁用外键检查**。
-TARGET_SOURCE = 'ciyu'  # 只修改这一项为 'chengyu' 或 'ciyu'
+TARGET_SOURCE = 'chengyu'  # 只修改这一项为 'chengyu' 或 'ciyu'
 # =======================================================================
 
 

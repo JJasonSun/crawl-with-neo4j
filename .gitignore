@@ -90,3 +90,8 @@ profile_stats
 
 # Keep this file tracked
 !/.gitignore
+
+*.json
+*.csv
+
+# End of .gitignore

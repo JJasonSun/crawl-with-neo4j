@@ -13,8 +13,8 @@ import pymysql
 import json
 
 # 模式标志：是否为测试模式（不实际写入数据库）
-# TEST_MODE = False
-TEST_MODE = True
+TEST_MODE = False
+# TEST_MODE = True
 
 # MySQL 连接配置
 mysql_config = {
