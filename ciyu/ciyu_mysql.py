@@ -7,8 +7,8 @@ import json
 import pymysql
 
 # 模式标志：是否为测试模式（不实际写入数据库）
-TEST_MODE = False
-# TEST_MODE = True
+# TEST_MODE = False
+TEST_MODE = True
 
 # MySQL 连接配置
 mysql_config = {
@@ -203,3 +203,27 @@ def save_ciyu_to_db(ciyu_data: dict) -> bool:
         return False
     finally:
         connection.close()
+
+
+def main():
+    conn = get_database_connection()
+    if not conn:
+        print("无法建立连接")
+        return 2
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT VERSION() AS v;")
+        print("数据库可达，版本：", cur.fetchone())
+    except Exception as e:
+        print("执行测试查询失败：", e)
+        return 3
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    return 0
+
+
+if __name__ == '__main__':
+    exit(main())
