@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-分批爬取成语并记录每批性能指标（耗时、插入速率、错误率）。
-默认每批 100 条。结果会追加写入 chengyu/batch_metrics.csv。
+分批爬取成语并记录每批性能指标（耗时、插入速率、错误率）、可续爬的 pending 清理逻辑及批量写入。
+默认每批 1000 条，并将结果追加写入 chengyu/batch_metrics.csv。
 
-注意：这个脚本会实际请求网页并写入数据库，请确保你想现在执行完整爬取。
+注意：这个脚本会实际请求网页并写入数据库（含 pending 回写、限流重试等机制），
+请确认批量操作前已准备好网络与数据库权限。
 
 使用示例：
-    python batch_crawl.py --batch 100 --request-delay 1.0 --search-delay 0.5
+    python batch_crawl.py --batch 1000 --request-delay 0 --search-delay 0
 """
 import time
 import csv
@@ -27,7 +28,6 @@ DEFAULT_BATCH_SIZE = 1000 # 批量处理的成语数量
 DEFAULT_REQUEST_DELAY = 0.0 # 每个成语详情请求的延迟（由抖动控制）
 DEFAULT_SEARCH_DELAY = 0.0  # 搜索成语 URL 时的延时（由抖动控制）
 DEFAULT_JITTER_MAX = 0.8    # 每次请求的最大随机抖动（秒）
-PROCESSED_PATH = os.path.join(os.path.dirname(__file__), 'processed.json')
 PENDING_PATH = os.path.join(os.path.dirname(__file__), 'pending.json')
 DB_BATCH_SIZE = 50
 DB_FLUSH_INTERVAL = 3.0
@@ -37,17 +37,38 @@ BLOCK_BACKOFF_MAX = 3600    # 最大退避时长
 DEFAULT_GRACEFUL_SHUTDOWN_WAIT = 3.0  # Ctrl+C 后等待写库的最长秒数（可调整）
 # ==========================================
 
+def read_total_processed_from_csv():
+    """读取 batch_metrics.csv 中记录的最大已处理数量（end 字段）。"""
+    try:
+        if not os.path.exists(CSV_PATH):
+            return 0
+        with open(CSV_PATH, 'r', encoding='utf-8-sig') as f:
+            reader = csv.DictReader(f)
+            last_end = 0
+            for row in reader:
+                try:
+                    e = int(row.get('end') or 0)
+                    if e > last_end:
+                        last_end = e
+                except Exception:
+                    continue
+            return last_end
+    except Exception:
+        return 0
 
-def run_batch(batch_idx, idioms, request_delay=0.0, search_delay=0.0, jitter_max=DEFAULT_JITTER_MAX, db_batch_size=DB_BATCH_SIZE, graceful_wait_seconds=DEFAULT_GRACEFUL_SHUTDOWN_WAIT):
-    """单线程抓取 + 后台批量写入（生产者-消费者），支持随机抖动与断点续爬。
-    """
+
+def run_batch(batch_idx, idioms, request_delay=0.0, search_delay=0.0, jitter_max=DEFAULT_JITTER_MAX,
+              db_batch_size=DB_BATCH_SIZE, graceful_wait_seconds=DEFAULT_GRACEFUL_SHUTDOWN_WAIT,
+              processed_offset_start=0):
+    """单线程抓取 + 后台批量写入（生产者-消费者），支持随机抖动与断点续爬。"""
     start_time = time.perf_counter()
     processed = 0
     success = 0
     fail = 0
     errors = []
+    was_interrupted = False
 
-    # helper to safely read/write json lists (handles empty/corrupt files)
+    # 安全读写 JSON 列表（兼容空或损坏的文件）
     def read_json_list(path):
         try:
             if not os.path.exists(path):
@@ -67,9 +88,7 @@ def run_batch(batch_idx, idioms, request_delay=0.0, search_delay=0.0, jitter_max
         except Exception as e:
             print(f'写入 JSON 文件失败 ({path}):', e)
 
-    # load processed set for checkpoint resume
-    processed_set = set(read_json_list(PROCESSED_PATH))
-    # load pending set (items that were queued previously but not yet confirmed written)
+    # 读取 pending 列表（尚未确认写入的数据）
     pending_list = read_json_list(PENDING_PATH)
     pending_set = set(pending_list)
 
@@ -77,17 +96,6 @@ def run_batch(batch_idx, idioms, request_delay=0.0, search_delay=0.0, jitter_max
     writer_stop = threading.Event()
     writer_stats = {'success': 0, 'fail': 0}
     lock = threading.Lock()
-
-    def persist_processed(ch):
-        # append to processed file (keep it small)
-        try:
-            with lock:
-                lst = read_json_list(PROCESSED_PATH)
-                if ch not in lst:
-                    lst.append(ch)
-                    write_json_list(PROCESSED_PATH, lst)
-        except Exception as e:
-            print('写入 processed 文件失败:', e)
 
     def persist_pending(ch):
         try:
@@ -111,34 +119,28 @@ def run_batch(batch_idx, idioms, request_delay=0.0, search_delay=0.0, jitter_max
             if item is not None:
                 buffer.append(item)
 
-            # flush conditions
+            # 刷新条件
             if (len(buffer) >= db_batch_size) or (buffer and (time.time() - last_flush) > DB_FLUSH_INTERVAL) or (writer_stop.is_set() and buffer):
-                # write buffer
+                # 写入缓冲区
                 for it in buffer:
                     try:
                         ok = save_chengyu_to_db(it)
                         if ok:
                             writer_stats['success'] += 1
-                            # mark as processed (use chengyu name from parsed data if available)
                             chn = None
                             try:
                                 chn = it.get('data', {}).get('chengyu')
                             except Exception:
                                 chn = None
                             if chn:
-                                # remove from pending and add to processed
                                 try:
                                     with lock:
                                         p_lst = read_json_list(PENDING_PATH)
                                         if chn in p_lst:
                                             p_lst.remove(chn)
                                             write_json_list(PENDING_PATH, p_lst)
-                                        lst = read_json_list(PROCESSED_PATH)
-                                        if chn not in lst:
-                                            lst.append(chn)
-                                            write_json_list(PROCESSED_PATH, lst)
                                 except Exception as e:
-                                    print('更新 pending/processed 失败:', e)
+                                    print('更新 pending 失败:', e)
                         else:
                             writer_stats['fail'] += 1
                     except Exception as e:
@@ -147,60 +149,41 @@ def run_batch(batch_idx, idioms, request_delay=0.0, search_delay=0.0, jitter_max
                 buffer = []
                 last_flush = time.time()
 
-        # writer exiting
+        # 写入线程即将退出
 
     writer = threading.Thread(target=db_writer, daemon=True)
     writer.start()
 
     session = requests.Session()
 
-    # Build working list: first re-process any pending items (they may not have been written),
-    # then process remaining idioms that are neither processed nor pending.
-    work_list = []
-    for p in pending_list:
-        if p not in processed_set:
-            work_list.append(p)
-    for chengyu in idioms:
-        if chengyu in processed_set or chengyu in pending_set:
-            continue
-        work_list.append(chengyu)
+    chunk_processed = 0
+    missing_detail_pages = 0
 
-    for chengyu in work_list:
-        # skip already processed (断点续爬)
-        if chengyu in processed_set:
+    def _process_idiom(chengyu):
+        nonlocal processed, success, fail, was_interrupted, missing_detail_pages
+        def mark_processed():
+            nonlocal processed
             processed += 1
-            continue
-
-        processed += 1
         try:
-            # small random jitter before search
             time.sleep(random.uniform(0, jitter_max))
             url = get_chengyu_url(chengyu, delay=search_delay, session=session)
 
-            # If no detail page was found for this chengyu, treat it as processed
-            # (persist to processed.json) but do NOT log it as an error in CSV.
             if url is None:
-                try:
-                    persist_processed(chengyu)
-                    processed_set.add(chengyu)
-                except Exception:
-                    pass
-                # count as processed but not a DB insert / not an error
-                continue
+                missing_detail_pages += 1
+                mark_processed()
+                return True
 
-            # detect blocked response from get_chengyu_url
             blocked_detected = False
             if isinstance(url, dict):
-                # structured response: {'blocked': code} or {'error': ...}
                 if url.get('blocked'):
                     blocked_detected = True
                 elif url.get('error'):
                     fail += 1
                     errors.append((chengyu, url.get('error')))
-                    continue
+                    mark_processed()
+                    return True
 
             if blocked_detected:
-                # exponential backoff / or immediate stop depending on MAX_BLOCK_RETRIES
                 backoff = BLOCK_BACKOFF_BASE
                 tried = 0
                 recovered = False
@@ -216,15 +199,12 @@ def run_batch(batch_idx, idioms, request_delay=0.0, search_delay=0.0, jitter_max
 
                 if not recovered:
                     print(f"检测到被限流/封禁（成语: {chengyu}），已停止本批次爬取以等待人工或下次重试。")
-                    # break main loop to allow graceful shutdown and resume later
-                    break
+                    return False
 
             time.sleep(random.uniform(0, jitter_max))
             data = extract_chengyu_details_from_url(url, delay=request_delay, session=session)
 
-            # detect blocked response from extract function
             if isinstance(data, dict) and data.get('error') in ('blocked',) or (isinstance(data, dict) and data.get('status') in (429,403,503)):
-                # similar handling as above
                 blocked_status = data.get('status') or (data.get('error') == 'blocked' and None)
                 backoff = BLOCK_BACKOFF_BASE
                 tried = 0
@@ -241,15 +221,14 @@ def run_batch(batch_idx, idioms, request_delay=0.0, search_delay=0.0, jitter_max
 
                 if not recovered:
                     print(f"检测到被限流/封禁（详情页: {url}），已停止本批次爬取以等待人工或下次重试。")
-                    break
+                    return False
 
-            # if parsing returned error, record and continue
             if isinstance(data, dict) and 'error' in data:
                 fail += 1
                 errors.append((chengyu, data.get('error')))
-                continue
+                mark_processed()
+                return True
 
-            # attach chengyu name if missing
             try:
                 if 'data' not in data or not data.get('data'):
                     data = {'url': url, 'data': {'chengyu': chengyu}}
@@ -259,8 +238,6 @@ def run_batch(batch_idx, idioms, request_delay=0.0, search_delay=0.0, jitter_max
             except Exception:
                 pass
 
-            # enqueue for DB writer
-            # persist pending immediately to avoid re-queue on abrupt stop
             chn = None
             try:
                 chn = data.get('data', {}).get('chengyu')
@@ -271,30 +248,47 @@ def run_batch(batch_idx, idioms, request_delay=0.0, search_delay=0.0, jitter_max
                 pending_set.add(chn)
             q.put(data)
             success += 1
+            mark_processed()
+            return True
 
         except KeyboardInterrupt:
-            # User requested interrupt (Ctrl+C). Signal writer to stop and
-            # wait a short configurable time for it to flush queued items.
             print('收到中断信号，等待短时间写库后退出...')
             writer_stop.set()
             try:
-                # wait up to graceful_wait_seconds for writer to finish
                 writer.join(timeout=graceful_wait_seconds)
             except Exception:
                 pass
-            # re-raise so caller (main) will stop starting new batches
-            raise
+            was_interrupted = True
+            return False
         except Exception as e:
             fail += 1
             errors.append((chengyu, str(e)))
+            mark_processed()
+            return True
 
-    # all tasks queued or loop interrupted
-    # signal writer to finish
+    def _process_pending_idioms():
+        for chengyu in pending_list:
+            if not _process_idiom(chengyu):
+                return False
+        return True
+
+    def _process_chunk_idioms():
+        nonlocal chunk_processed
+        for chengyu in idioms:
+            if chengyu in pending_set:
+                continue
+            if not _process_idiom(chengyu):
+                return False
+            chunk_processed += 1
+        return True
+
+    pending_completed = _process_pending_idioms()
+    if pending_completed and not was_interrupted:
+        _process_chunk_idioms()
+
     writer_stop.set()
     writer.join()
 
-    # collect writer stats
-    success += writer_stats.get('success', 0)
     fail += writer_stats.get('fail', 0)
 
     elapsed = time.perf_counter() - start_time
@@ -303,18 +297,18 @@ def run_batch(batch_idx, idioms, request_delay=0.0, search_delay=0.0, jitter_max
 
     metrics = {
         'batch_idx': batch_idx,
-        'start': batch_idx * len(idioms) + 1,
-        'end': batch_idx * len(idioms) + len(idioms),
+        'start': processed_offset_start + 1 if chunk_processed > 0 else processed_offset_start,
+        'end': processed_offset_start + chunk_processed,
         'processed': processed,
         'success': success,
         'fail': fail,
+        'missing_detail_pages': missing_detail_pages,
         'elapsed_seconds': round(elapsed, 3),
         'insert_rate_per_sec': round(insert_rate, 3),
         'error_rate': round(error_rate, 4),
         'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
     }
 
-    # append metrics to CSV
     write_header = not os.path.exists(CSV_PATH)
     with open(CSV_PATH, 'a', encoding='utf-8-sig', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=list(metrics.keys()))
@@ -322,7 +316,6 @@ def run_batch(batch_idx, idioms, request_delay=0.0, search_delay=0.0, jitter_max
             writer.writeheader()
         writer.writerow(metrics)
 
-    # also write batch error details file if there are errors
     if errors:
         err_path = os.path.join(os.path.dirname(__file__), f'batch_{batch_idx}_errors.csv')
         with open(err_path, 'w', encoding='utf-8-sig', newline='') as ef:
@@ -331,12 +324,10 @@ def run_batch(batch_idx, idioms, request_delay=0.0, search_delay=0.0, jitter_max
             for e in errors:
                 ew.writerow(e)
 
-    return metrics
+    if was_interrupted:
+        raise KeyboardInterrupt
 
-
-def chunked(iterable, n):
-    for i in range(0, len(iterable), n):
-        yield iterable[i:i+n]
+    return metrics, chunk_processed
 
 
 def main(batch_size=100, request_delay=1.0, search_delay=0.5):
@@ -347,18 +338,45 @@ def main(batch_size=100, request_delay=1.0, search_delay=0.5):
     total = len(idioms)
     print(f'获取到 {total} 个成语，分批大小: {batch_size}')
 
-    batch_idx = 0
-    for chunk in chunked(idioms, batch_size):
-        print(f'开始第 {batch_idx} 批: {batch_idx*batch_size+1}-{min((batch_idx+1)*batch_size, total)}')
+    processed_total = read_total_processed_from_csv()
+    if processed_total >= total:
+        print('所有成语已处理，跳过爬取。性能指标已追加到', CSV_PATH)
+        return 0
+
+    start_index = processed_total
+    batch_idx = start_index // batch_size
+
+    while start_index < total:
+        current_batch_end = min(((start_index // batch_size) + 1) * batch_size, total)
+        if start_index >= current_batch_end:
+            break
+        chunk = idioms[start_index:current_batch_end]
+        chunk_end = current_batch_end
+        print(f'开始第 {batch_idx} 批: {start_index+1}-{chunk_end} (已处理 {start_index})')
         try:
-            m = run_batch(batch_idx, chunk, request_delay=request_delay, search_delay=search_delay)
+            m, chunk_processed = run_batch(batch_idx, chunk, request_delay=request_delay,
+                                            search_delay=search_delay,
+                                            processed_offset_start=start_index)
             print('  批次指标:', m)
-            batch_idx += 1
         except KeyboardInterrupt:
             print('收到中断信号，停止后续批次。下次运行将从上次退出位置继续。')
             return 130
 
-    print('全部批次完成。性能指标已追加到', CSV_PATH)
+        if chunk_processed == 0:
+            print('本批次未处理新的成语，可能被封或空闲，先停止以便下次继续。')
+            break
+
+        start_index += chunk_processed
+        if chunk_processed < len(chunk):
+            print('本批次未完全完成，将在下一次运行继续剩余成语。')
+            break
+
+        batch_idx += 1
+
+    if start_index >= total:
+        print('全部批次完成。性能指标已追加到', CSV_PATH)
+    else:
+        print('本次运行处理到', start_index, '条成语，下一次将从此位置继续。')
     return 0
 
 
