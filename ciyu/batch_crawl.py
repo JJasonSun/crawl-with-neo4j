@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-分批爬取成语并记录每批性能指标（耗时、插入速率、错误率）、可续爬的 pending 清理逻辑及后台批量写入。
+分批爬取词语并记录每批性能指标（耗时、插入速率、错误率）、可续爬的 pending 清理逻辑及后台批量写入。
 默认每批 1000 条，结果会追加写入 ciyu/batch_metrics.csv，并自动按照上次运行的 end 值续爬。
-错误记录追加到 chengyu/batch_{batch_idx}_errors.csv，包含成语与错误信息。
+错误记录追加到 ciyu/batch_{batch_idx}_errors.csv，包含词语与错误信息。
 
 注意：这个脚本会实际请求网页并写入数据库（含 pending 回写、限流重试、网络异常重试等机制），
 请确认批量操作前已准备好网络与数据库权限。
@@ -28,7 +28,7 @@ from ciyu_mysql import save_ciyu_to_db
 
 # === 网络异常（断网、封IP、限流等）重试配置 ===
 RETRY_BACKOFF_BASE = 300  # 初始退避秒数
-RETRY_BACKOFF_MAX = 15  # 最大退避时长
+RETRY_BACKOFF_MAX = 3600  # 最大退避时长
 # ==========================================
 
 class NetworkOutageError(Exception):
