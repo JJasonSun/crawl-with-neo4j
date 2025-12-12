@@ -22,15 +22,25 @@ from chengyu_neo4j import get_idioms_from_neo4j
 from extract_chengyu import get_chengyu_url, extract_chengyu_details_from_url
 from chengyu_mysql import save_chengyu_to_db
 
-# === 网络异常重试配置 ===
-NETWORK_RETRY_DELAY = 6  # 秒
-NETWORK_RETRY_LIMIT = 1
+# === 网络异常（断网、封IP、限流等）重试配置 ===
+RETRY_BACKOFF_BASE = 300  # 初始退避秒数
+RETRY_BACKOFF_MAX = 3600  # 最大退避时长
 # ==========================================
 
 
 class NetworkOutageError(Exception):
-    """表示网络异常未恢复，需要停止本批次并等待人为重启。"""
-    """这个类本身没有任何特殊逻辑，仅作为标记使用。因此是空的。具体的重试逻辑在_call_with_network_retry 函数中实现。"""
+    """表示网络异常未恢复，需要停止本批次并等待人为重启。
+
+    这个异常类本身没有任何逻辑，只作为标记使用。网路重试的实际行为都在
+    `_call_with_network_retry` 内部实现。"""
+
+
+class TransientAccessError(Exception):
+    """用于表示需要退避重试的临时访问失败（断网、封禁等）。"""
+
+    def __init__(self, detail=None):
+        super().__init__(detail)
+        self.detail = detail
 
 CSV_PATH = os.path.join(os.path.dirname(__file__), 'batch_metrics.csv')
 
@@ -40,13 +50,37 @@ DEFAULT_REQUEST_DELAY = 0.0 # 每个成语详情请求的延迟（由抖动控�
 DEFAULT_SEARCH_DELAY = 0.0  # 搜索成语 URL 时的延时（由抖动控制）
 DEFAULT_JITTER_MAX = 0.8    # 每次请求的最大随机抖动（秒）
 PENDING_PATH = os.path.join(os.path.dirname(__file__), 'pending.json')
-DB_BATCH_SIZE = 50
-DB_FLUSH_INTERVAL = 3.0
-MAX_BLOCK_RETRIES = 1        # 当检测到被封时的最大重试次数（0 表示不重试，直接停止）
-BLOCK_BACKOFF_BASE = 60     # 初始退避秒数
-BLOCK_BACKOFF_MAX = 3600    # 最大退避时长
+DB_BATCH_SIZE = 50 # 每次写入数据库的批量大小
+DB_FLUSH_INTERVAL = 3.0 # 数据库写入缓冲区最大等待秒数
 DEFAULT_GRACEFUL_SHUTDOWN_WAIT = 3.0  # Ctrl+C 后等待写库的最长秒数（可调整）
 # ==========================================
+
+def _compute_backoff_delay(attempt):
+    try:
+        return min(RETRY_BACKOFF_BASE * (2 ** attempt), RETRY_BACKOFF_MAX)
+    except OverflowError:
+        return RETRY_BACKOFF_MAX
+
+
+def _retry_with_backoff(action, label):
+    attempt = 0
+    waited_max_delay = False
+    while True:
+        try:
+            return action()
+        except TransientAccessError as exc:
+            detail_suffix = f" ({exc.detail})" if exc.detail else ""
+            delay = _compute_backoff_delay(attempt)
+            msg = f"检测到{label}{detail_suffix}, 第 {attempt+1} 次重试，等待 {delay}s..."
+            if delay >= RETRY_BACKOFF_MAX:
+                if waited_max_delay:
+                    print(f"{msg} 已达到最大退避，停止重试。")
+                    raise
+                waited_max_delay = True
+            print(msg)
+            time.sleep(delay)
+            attempt += 1
+
 
 def read_total_processed_from_csv():
     """读取 batch_metrics.csv 中记录的最大已处理数量（end 字段）。"""
@@ -110,19 +144,17 @@ def run_batch(batch_idx, idioms, request_delay=0.0, search_delay=0.0, jitter_max
 
     def _call_with_network_retry(func, *args, **kwargs):
         """包装函数，遇到网络异常时等待后重试，超过限制则抛出 NetworkOutageError。"""
-        nonlocal network_retry_attempts
-        while True:
+        def action():
             try:
-                result = func(*args, **kwargs)
-                network_retry_attempts = 0
-                return result
+                return func(*args, **kwargs)
             except requests.RequestException as exc:
-                if network_retry_attempts >= NETWORK_RETRY_LIMIT:
-                    print('网络异常持续存在，已达到重试上限，终止本次批次。')
-                    raise NetworkOutageError from exc
-                print(f'检测到网络异常，等待 {NETWORK_RETRY_DELAY} 秒后再试一次...')
-                network_retry_attempts += 1
-                time.sleep(NETWORK_RETRY_DELAY)
+                raise TransientAccessError(str(exc)) from exc
+
+        try:
+            return _retry_with_backoff(action, '网络异常')
+        except TransientAccessError as exc:
+            print('网络异常持续存在，已达到最大退避时长，终止本批次。')
+            raise NetworkOutageError from exc
 
     def persist_pending(ch):
         try:
@@ -184,73 +216,46 @@ def run_batch(batch_idx, idioms, request_delay=0.0, search_delay=0.0, jitter_max
     session = requests.Session()
 
     chunk_processed = 0
-    network_retry_attempts = 0 # 网络重试计数
     missing_detail_pages = 0
 
     def _process_idiom(chengyu):
         nonlocal processed, success, fail, was_interrupted, missing_detail_pages
+
         def mark_processed():
             nonlocal processed
             processed += 1
+
+        def _resolve_search_url():
+            url = _call_with_network_retry(get_chengyu_url, chengyu, delay=search_delay, session=session)
+            if isinstance(url, dict) and url.get('blocked'):
+                raise TransientAccessError(f"status={url.get('blocked')}")
+            return url
+
+        def _fetch_detail():
+            data = _call_with_network_retry(extract_chengyu_details_from_url, url, delay=request_delay, session=session)
+            if isinstance(data, dict) and (data.get('error') in ('blocked',) or (data.get('status') in (429, 403, 503))):
+                blocked_status = data.get('status')
+                if not blocked_status and data.get('error') == 'blocked':
+                    blocked_status = 'blocked'
+                raise TransientAccessError(f"status={blocked_status}")
+            return data
+
         try:
             time.sleep(random.uniform(0, jitter_max))
-            url = _call_with_network_retry(get_chengyu_url, chengyu, delay=search_delay, session=session)
+            url = _retry_with_backoff(_resolve_search_url, '限流/封禁 (搜索)')
+            if isinstance(url, dict) and url.get('error'):
+                fail += 1
+                errors.append((chengyu, url.get('error')))
+                mark_processed()
+                return True
 
             if url is None:
                 missing_detail_pages += 1
                 mark_processed()
                 return True
 
-            blocked_detected = False
-            if isinstance(url, dict):
-                if url.get('blocked'):
-                    blocked_detected = True
-                elif url.get('error'):
-                    fail += 1
-                    errors.append((chengyu, url.get('error')))
-                    mark_processed()
-                    return True
-
-            if blocked_detected:
-                backoff = BLOCK_BACKOFF_BASE
-                tried = 0
-                recovered = False
-                while tried < MAX_BLOCK_RETRIES:
-                    print(f"检测到可能的限流/封禁 (status={url.get('blocked')}), 第 {tried+1} 次重试，等待 {backoff}s...")
-                    time.sleep(backoff)
-                    backoff = min(backoff * 2, BLOCK_BACKOFF_MAX)
-                    tried += 1
-                    url = get_chengyu_url(chengyu, delay=search_delay, session=session)
-                    if not isinstance(url, dict) or (isinstance(url, dict) and not url.get('blocked')):
-                        recovered = True
-                        break
-
-                if not recovered:
-                    print(f"检测到被限流/封禁（成语: {chengyu}），已停止本批次爬取以等待人工或下次重试。")
-                    return False
-
             time.sleep(random.uniform(0, jitter_max))
-            data = _call_with_network_retry(extract_chengyu_details_from_url, url, delay=request_delay, session=session)
-
-            if isinstance(data, dict) and data.get('error') in ('blocked',) or (isinstance(data, dict) and data.get('status') in (429,403,503)):
-                blocked_status = data.get('status') or (data.get('error') == 'blocked' and None)
-                backoff = BLOCK_BACKOFF_BASE
-                tried = 0
-                recovered = False
-                while tried < MAX_BLOCK_RETRIES:
-                    print(f"检测到可能的限流/封禁 (status={blocked_status}), 第 {tried+1} 次重试，等待 {backoff}s...")
-                    time.sleep(backoff)
-                    backoff = min(backoff * 2, BLOCK_BACKOFF_MAX)
-                    tried += 1
-                    data = extract_chengyu_details_from_url(url, delay=request_delay, session=session)
-                    if not (isinstance(data, dict) and data.get('error') in ('blocked',) or (isinstance(data, dict) and data.get('status') in (429,403,503))):
-                        recovered = True
-                        break
-
-                if not recovered:
-                    print(f"检测到被限流/封禁（详情页: {url}），已停止本批次爬取以等待人工或下次重试。")
-                    return False
-
+            data = _retry_with_backoff(_fetch_detail, '限流/封禁 (详情页)')
             if isinstance(data, dict) and 'error' in data:
                 fail += 1
                 errors.append((chengyu, data.get('error')))
@@ -278,7 +283,6 @@ def run_batch(batch_idx, idioms, request_delay=0.0, search_delay=0.0, jitter_max
             success += 1
             mark_processed()
             return True
-
         except KeyboardInterrupt:
             print('收到中断信号，等待短时间写库后退出...')
             writer_stop.set()
@@ -289,10 +293,10 @@ def run_batch(batch_idx, idioms, request_delay=0.0, search_delay=0.0, jitter_max
             was_interrupted = True
             return False
         except NetworkOutageError:
-            raise # 继续向上抛出以终止批次
-        except Exception as e:
+            raise
+        except Exception as exc:
             fail += 1
-            errors.append((chengyu, str(e)))
+            errors.append((chengyu, str(exc)))
             mark_processed()
             return True
 
@@ -311,7 +315,8 @@ def run_batch(batch_idx, idioms, request_delay=0.0, search_delay=0.0, jitter_max
                 return False
             chunk_processed += 1
         return True
-
+    
+    pending_completed = False # 是否已完成 pending 列表的处理
     try:
         pending_completed = _process_pending_idioms()
         if pending_completed and not was_interrupted:
@@ -319,9 +324,9 @@ def run_batch(batch_idx, idioms, request_delay=0.0, search_delay=0.0, jitter_max
     except NetworkOutageError:
         print('网络异常仍未恢复，终止本批次以便下次重试。')
         was_interrupted = True
-
-    writer_stop.set()
-    writer.join()
+    finally: # 最后确保写入线程退出
+        writer_stop.set()
+        writer.join()
 
     fail += writer_stats.get('fail', 0)
 
@@ -415,7 +420,7 @@ def main(batch_size=100, request_delay=1.0, search_delay=0.5):
 
 
 if __name__ == '__main__':
-    # 直接使用文件顶部的默认常量，便于运行前手动修改
+    # 直接使用文件顶部的默认常量，运行前可手动修改
     exit(main(batch_size=DEFAULT_BATCH_SIZE,
               request_delay=DEFAULT_REQUEST_DELAY,
               search_delay=DEFAULT_SEARCH_DELAY))

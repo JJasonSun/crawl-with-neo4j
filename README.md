@@ -41,7 +41,7 @@
    - 每次请求前会有两层延迟控制：固定延迟（`request_delay` / `search_delay`）+ 随机抖动（`jitter_max`）。固定延迟保证最小间隔，抖动用于打散请求节奏，降低被限流概率。
 5. 限流/封禁检测与退避
 
-   - 对于检测到 `blocked` 或常见限流状态码（429、403、503），支持指数退避重试（由 `MAX_BLOCK_RETRIES`、`BLOCK_BACKOFF_BASE`、`BLOCK_BACKOFF_MAX` 控制）。
+   - 对于检测到 `blocked` 或常见限流状态码（429、403、503），统一使用指数退避重试：从 `RETRY_BACKOFF_BASE` 开始、每次翻倍、直到 `RETRY_BACKOFF_MAX` 为止，达到最大退避后会停止重试，并通过 `NetworkOutageError` 等外部捕获上报。
 6. 指标与错误输出
 
    - 每批会输出并追加到 `batch_metrics.csv` 的字段：
@@ -100,4 +100,4 @@ uv run .\\ciyu\\batch_crawl.py
 - 本脚本会对第三方网站发起真实请求，请确保遵守目标网站的 robots/使用条款及本地网络策略。
 - 长时间运行可能触发目标站点的限流或封禁，请合理设置 `request_delay`、`jitter_max` 及重试策略。
 - 在生产环境运行前务必配置好数据库连接与备份策略，测试模式不会写库但也无法验证后端事务行为。
-- 如果遇到临时断网（`requests.RequestException`）会自动等待 10 分钟再重试一次；如果重试仍然失败，会抛出 `NetworkOutageError` 终止当前批次（这个异常类本身就是一个空的标记类型，负责告诉调用方“请在网络恢复后再次人工重启脚本”）。
+- 如果遇到临时断网（`requests.RequestException`），会以 `RETRY_BACKOFF_BASE`（默认 5 分钟）为起点逐次翻倍等待、退避时间不会超过 `RETRY_BACKOFF_MAX`；一旦已经等待过最大退避仍然无法恢复，脚本会抛出 `NetworkOutageError` 终止当前批次，提示等待网络恢复后再重启。
