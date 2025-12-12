@@ -1,17 +1,22 @@
 # -*- coding: utf-8 -*-
 """
-分批爬取词语并记录每批性能指标（耗时、插入速率、错误率）、可续爬的 pending 清理与后台批量写入。
-结果会追加写入 ciyu/batch_metrics.csv，并自动按照上次运行的 end 值续爬。
+分批爬取成语并记录每批性能指标（耗时、插入速率、错误率）、可续爬的 pending 清理逻辑及后台批量写入。
+默认每批 1000 条，结果会追加写入 ciyu/batch_metrics.csv，并自动按照上次运行的 end 值续爬。
+错误记录追加到 chengyu/batch_{batch_idx}_errors.csv，包含成语与错误信息。
 
-使用：在文件顶部修改 DEFAULT_* 常量后直接运行
+注意：这个脚本会实际请求网页并写入数据库（含 pending 回写、限流重试、网络异常重试等机制），
+请确认批量操作前已准备好网络与数据库权限。
+
+使用示例：
     python batch_crawl.py
 """
 import time
 import csv
 import os
-import threading
 import queue
 import random
+import threading
+import requests
 import json
 
 from extract_ciyu import (
@@ -20,6 +25,17 @@ from extract_ciyu import (
     extract_ciyu_details_from_url,
 )
 from ciyu_mysql import save_ciyu_to_db
+
+# === 网络异常重试配置 ===
+NETWORK_RETRY_DELAY = 6  # 秒
+NETWORK_RETRY_LIMIT = 1
+# ==========================================
+
+class NetworkOutageError(Exception):
+    """表示网络异常未恢复，需要停止本批次并等待人为重启。
+
+    这个异常类本身没有任何逻辑，只作为信号使用。网路重试的实际行为都在
+    `_call_with_network_retry` 内部实现。"""
 
 CSV_PATH = os.path.join(os.path.dirname(__file__), 'batch_metrics.csv')
 
@@ -94,6 +110,22 @@ def run_batch(batch_idx, words, request_delay=DEFAULT_REQUEST_DELAY, search_dela
     writer_stop = threading.Event()
     writer_stats = {'success': 0, 'fail': 0}
     lock = threading.Lock()
+    network_retry_attempts = 0
+
+    def _call_with_network_retry(func, *args, **kwargs):
+        nonlocal network_retry_attempts
+        while True:
+            try:
+                result = func(*args, **kwargs)
+                network_retry_attempts = 0
+                return result
+            except requests.RequestException as exc:
+                if network_retry_attempts >= NETWORK_RETRY_LIMIT:
+                    print('网络异常持续存在，已达到重试上限，终止本批次。')
+                    raise NetworkOutageError from exc
+                print(f'检测到网络异常，等待 {NETWORK_RETRY_DELAY} 秒后再试一次...')
+                network_retry_attempts += 1
+                time.sleep(NETWORK_RETRY_DELAY)
 
     def persist_pending(word):
         try:
@@ -159,7 +191,7 @@ def run_batch(batch_idx, words, request_delay=DEFAULT_REQUEST_DELAY, search_dela
 
         try:
             time.sleep(random.uniform(0, jitter_max))
-            url = get_ciyu_url(word, delay=search_delay)
+            url = _call_with_network_retry(get_ciyu_url, word, delay=search_delay)
             if not url:
                 missing_detail_pages += 1
                 fail += 1
@@ -168,7 +200,7 @@ def run_batch(batch_idx, words, request_delay=DEFAULT_REQUEST_DELAY, search_dela
                 return True
 
             time.sleep(random.uniform(0, jitter_max))
-            data = extract_ciyu_details_from_url(url, delay=request_delay)
+            data = _call_with_network_retry(extract_ciyu_details_from_url, url, delay=request_delay)
             if isinstance(data, dict) and 'error' in data:
                 fail += 1
                 errors.append((word, data.get('error')))
@@ -197,6 +229,8 @@ def run_batch(batch_idx, words, request_delay=DEFAULT_REQUEST_DELAY, search_dela
                 pass
             was_interrupted = True
             return False
+        except NetworkOutageError:
+            raise
         except Exception as exc:
             fail += 1
             errors.append((word, str(exc)))
@@ -219,12 +253,17 @@ def run_batch(batch_idx, words, request_delay=DEFAULT_REQUEST_DELAY, search_dela
             chunk_processed += 1
         return True
 
-    pending_completed = _process_pending_words()
-    if pending_completed and not was_interrupted:
-        _process_chunk_words()
-
-    writer_stop.set()
-    writer.join()
+    pending_completed = False
+    try:
+        pending_completed = _process_pending_words()
+        if pending_completed and not was_interrupted:
+            _process_chunk_words()
+    except NetworkOutageError:
+        print('网络异常仍未恢复，终止本批次以便下次重试。')
+        was_interrupted = True
+    finally:
+        writer_stop.set()
+        writer.join()
 
     fail += writer_stats.get('fail', 0)
 

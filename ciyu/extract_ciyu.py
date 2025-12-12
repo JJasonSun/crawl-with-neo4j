@@ -48,7 +48,7 @@ def get_ciyu_url(word: str, delay: float = 0.5) -> Optional[str]:
         return None
     except requests.RequestException as exc:
         print(f"获取词语 '{word}' 的 URL 失败: {exc}")
-        return None
+        raise
     except Exception as exc:  # noqa: BLE001
         print(f"获取词语 '{word}' 的 URL 时发生未知错误: {exc}")
         return None
@@ -156,6 +156,6 @@ def extract_ciyu_details_from_url(url: str, delay: float = 1.0) -> Dict:
 
         return extract_ciyu_details_from_html(html, url=url)
     except requests.RequestException as exc:
-        return {"url": url, "error": f"网络请求失败: {exc}"}
+        raise
     except Exception as exc:  # noqa: BLE001
         return {"url": url, "error": f"处理失败: {exc}"}

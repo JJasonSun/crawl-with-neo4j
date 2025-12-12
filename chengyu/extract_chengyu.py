@@ -53,7 +53,7 @@ def get_chengyu_url(chengyu, delay=0.5, session=None):
         return None
     except requests.exceptions.RequestException as e:
         print(f"获取成语'{chengyu}'的URL失败: {str(e)}")
-        return {'error': str(e)}
+        raise
     except Exception as e:
         print(f"获取成语'{chengyu}'的URL时发生未知错误: {str(e)}")
         return {'error': str(e)}
@@ -210,11 +210,8 @@ def extract_chengyu_details_from_url(url, delay=1.0, session=None):
         # 使用HTML解析函数
         return extract_chengyu_details_from_html(html_content, url)
         
-    except requests.exceptions.RequestException as e:
-        return {
-            "url": url,
-            "error": f"网络请求失败: {str(e)}"
-        }
+    except requests.exceptions.RequestException:
+        raise # 改为向上抛出异常，由调用方处理
     except Exception as e:
         return {
             "url": url,

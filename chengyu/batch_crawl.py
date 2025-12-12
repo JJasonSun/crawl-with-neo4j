@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
 """
 分批爬取成语并记录每批性能指标（耗时、插入速率、错误率）、可续爬的 pending 清理逻辑及批量写入。
-默认每批 1000 条，并将结果追加写入 chengyu/batch_metrics.csv。
+默认每批 1000 条，结果会追加写入 ciyu/batch_metrics.csv，并自动按照上次运行的 end 值续爬。
+错误记录追加到 chengyu/batch_{batch_idx}_errors.csv，包含成语与错误信息。
 
-注意：这个脚本会实际请求网页并写入数据库（含 pending 回写、限流重试等机制），
+注意：这个脚本会实际请求网页并写入数据库（含 pending 回写、限流重试、网络异常重试等机制），
 请确认批量操作前已准备好网络与数据库权限。
 
 使用示例：
-    python batch_crawl.py --batch 1000 --request-delay 0 --search-delay 0
+    python batch_crawl.py
 """
 import time
 import csv
@@ -20,6 +21,16 @@ import json
 from chengyu_neo4j import get_idioms_from_neo4j
 from extract_chengyu import get_chengyu_url, extract_chengyu_details_from_url
 from chengyu_mysql import save_chengyu_to_db
+
+# === 网络异常重试配置 ===
+NETWORK_RETRY_DELAY = 6  # 秒
+NETWORK_RETRY_LIMIT = 1
+# ==========================================
+
+
+class NetworkOutageError(Exception):
+    """表示网络异常未恢复，需要停止本批次并等待人为重启。"""
+    """这个类本身没有任何特殊逻辑，仅作为标记使用。因此是空的。具体的重试逻辑在_call_with_network_retry 函数中实现。"""
 
 CSV_PATH = os.path.join(os.path.dirname(__file__), 'batch_metrics.csv')
 
@@ -97,6 +108,22 @@ def run_batch(batch_idx, idioms, request_delay=0.0, search_delay=0.0, jitter_max
     writer_stats = {'success': 0, 'fail': 0}
     lock = threading.Lock()
 
+    def _call_with_network_retry(func, *args, **kwargs):
+        """包装函数，遇到网络异常时等待后重试，超过限制则抛出 NetworkOutageError。"""
+        nonlocal network_retry_attempts
+        while True:
+            try:
+                result = func(*args, **kwargs)
+                network_retry_attempts = 0
+                return result
+            except requests.RequestException as exc:
+                if network_retry_attempts >= NETWORK_RETRY_LIMIT:
+                    print('网络异常持续存在，已达到重试上限，终止本次批次。')
+                    raise NetworkOutageError from exc
+                print(f'检测到网络异常，等待 {NETWORK_RETRY_DELAY} 秒后再试一次...')
+                network_retry_attempts += 1
+                time.sleep(NETWORK_RETRY_DELAY)
+
     def persist_pending(ch):
         try:
             with lock:
@@ -157,6 +184,7 @@ def run_batch(batch_idx, idioms, request_delay=0.0, search_delay=0.0, jitter_max
     session = requests.Session()
 
     chunk_processed = 0
+    network_retry_attempts = 0 # 网络重试计数
     missing_detail_pages = 0
 
     def _process_idiom(chengyu):
@@ -166,7 +194,7 @@ def run_batch(batch_idx, idioms, request_delay=0.0, search_delay=0.0, jitter_max
             processed += 1
         try:
             time.sleep(random.uniform(0, jitter_max))
-            url = get_chengyu_url(chengyu, delay=search_delay, session=session)
+            url = _call_with_network_retry(get_chengyu_url, chengyu, delay=search_delay, session=session)
 
             if url is None:
                 missing_detail_pages += 1
@@ -202,7 +230,7 @@ def run_batch(batch_idx, idioms, request_delay=0.0, search_delay=0.0, jitter_max
                     return False
 
             time.sleep(random.uniform(0, jitter_max))
-            data = extract_chengyu_details_from_url(url, delay=request_delay, session=session)
+            data = _call_with_network_retry(extract_chengyu_details_from_url, url, delay=request_delay, session=session)
 
             if isinstance(data, dict) and data.get('error') in ('blocked',) or (isinstance(data, dict) and data.get('status') in (429,403,503)):
                 blocked_status = data.get('status') or (data.get('error') == 'blocked' and None)
@@ -260,6 +288,8 @@ def run_batch(batch_idx, idioms, request_delay=0.0, search_delay=0.0, jitter_max
                 pass
             was_interrupted = True
             return False
+        except NetworkOutageError:
+            raise # 继续向上抛出以终止批次
         except Exception as e:
             fail += 1
             errors.append((chengyu, str(e)))
@@ -282,9 +312,13 @@ def run_batch(batch_idx, idioms, request_delay=0.0, search_delay=0.0, jitter_max
             chunk_processed += 1
         return True
 
-    pending_completed = _process_pending_idioms()
-    if pending_completed and not was_interrupted:
-        _process_chunk_idioms()
+    try:
+        pending_completed = _process_pending_idioms()
+        if pending_completed and not was_interrupted:
+            _process_chunk_idioms()
+    except NetworkOutageError:
+        print('网络异常仍未恢复，终止本批次以便下次重试。')
+        was_interrupted = True
 
     writer_stop.set()
     writer.join()
