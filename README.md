@@ -47,6 +47,13 @@
    - 每批会输出并追加到 `batch_metrics.csv` 的字段：
      - `batch_idx`, `start`, `end`, `processed`, `success`, `fail`, `missing_detail_pages`, `elapsed_seconds`, `insert_rate_per_sec`, `error_rate`, `timestamp`。
    - 若有解析或写入错误，会写入 `batch_{idx}_errors.csv`，格式为 `(key, error)`，便于审查。
+
+      - 新添 `termination_reason` 列用来记录每批次写入指标时的停止原因，字段值如下：
+         - `manual_exit`：手动 Ctrl+C 中断。
+         - `network_outage`：遇到持续网络异常、达到最大退避时间后退出。
+         - `blocked_ip`：本批未处理到任何新条目，常见于被封或无响应的情况。
+         - `batch_completed`：本批正常完成，但仍有剩余条目等待下一批覆盖。
+         - `all_done`：已处理完所有词语/成语，对应最后一个批次。
 7. 页面解析与职责分离
 
    - 所有 HTML 解析/URL 获取逻辑集中在 `extract_chengyu.py` 与 `extract_ciyu.py`。

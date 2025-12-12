@@ -104,7 +104,7 @@ def read_total_processed_from_csv():
 
 def run_batch(batch_idx, idioms, request_delay=0.0, search_delay=0.0, jitter_max=DEFAULT_JITTER_MAX,
               db_batch_size=DB_BATCH_SIZE, graceful_wait_seconds=DEFAULT_GRACEFUL_SHUTDOWN_WAIT,
-              processed_offset_start=0):
+              processed_offset_start=0, is_last_batch=False):
     """单线程抓取 + 后台批量写入（生产者-消费者），支持随机抖动与断点续爬。"""
     start_time = time.perf_counter()
     processed = 0
@@ -112,6 +112,7 @@ def run_batch(batch_idx, idioms, request_delay=0.0, search_delay=0.0, jitter_max
     fail = 0
     errors = []
     was_interrupted = False
+    termination_reason = 'batch_completed'
 
     # 安全读写 JSON 列表（兼容空或损坏的文件）
     def read_json_list(path):
@@ -219,7 +220,7 @@ def run_batch(batch_idx, idioms, request_delay=0.0, search_delay=0.0, jitter_max
     missing_detail_pages = 0
 
     def _process_idiom(chengyu):
-        nonlocal processed, success, fail, was_interrupted, missing_detail_pages
+        nonlocal processed, success, fail, was_interrupted, missing_detail_pages, termination_reason
 
         def mark_processed():
             nonlocal processed
@@ -284,6 +285,7 @@ def run_batch(batch_idx, idioms, request_delay=0.0, search_delay=0.0, jitter_max
             mark_processed()
             return True
         except KeyboardInterrupt:
+            termination_reason = 'manual_exit'
             print('收到中断信号，等待短时间写库后退出...')
             writer_stop.set()
             try:
@@ -324,11 +326,18 @@ def run_batch(batch_idx, idioms, request_delay=0.0, search_delay=0.0, jitter_max
     except NetworkOutageError:
         print('网络异常仍未恢复，终止本批次以便下次重试。')
         was_interrupted = True
+        termination_reason = 'network_outage'
     finally: # 最后确保写入线程退出
         writer_stop.set()
         writer.join()
 
     fail += writer_stats.get('fail', 0)
+
+    if termination_reason == 'batch_completed':
+        if chunk_processed == 0:
+            termination_reason = 'blocked_ip'
+        elif is_last_batch and idioms and chunk_processed >= len(idioms):
+            termination_reason = 'all_done'
 
     elapsed = time.perf_counter() - start_time
     insert_rate = success / elapsed if elapsed > 0 else 0
@@ -342,6 +351,7 @@ def run_batch(batch_idx, idioms, request_delay=0.0, search_delay=0.0, jitter_max
         'success': success,
         'fail': fail,
         'missing_detail_pages': missing_detail_pages,
+        'termination_reason': termination_reason,
         'elapsed_seconds': round(elapsed, 3),
         'insert_rate_per_sec': round(insert_rate, 3),
         'error_rate': round(error_rate, 4),
@@ -395,7 +405,8 @@ def main(batch_size=100, request_delay=1.0, search_delay=0.5):
         try:
             m, chunk_processed = run_batch(batch_idx, chunk, request_delay=request_delay,
                                             search_delay=search_delay,
-                                            processed_offset_start=start_index)
+                                            processed_offset_start=start_index,
+                                            is_last_batch=(chunk_end >= total))
             print('  批次指标:', m)
         except KeyboardInterrupt:
             print('收到中断信号，停止后续批次。下次运行将从上次退出位置继续。')
