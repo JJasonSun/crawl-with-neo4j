@@ -26,35 +26,68 @@ from extract_ciyu import (
 )
 from ciyu_mysql import save_ciyu_to_db
 
-# === 网络异常重试配置 ===
-NETWORK_RETRY_DELAY = 6  # 秒
-NETWORK_RETRY_LIMIT = 1
+# === 网络异常（断网、封IP、限流等）重试配置 ===
+RETRY_BACKOFF_BASE = 300  # 初始退避秒数
+RETRY_BACKOFF_MAX = 3600  # 最大退避时长
 # ==========================================
 
 class NetworkOutageError(Exception):
     """表示网络异常未恢复，需要停止本批次并等待人为重启。
 
-    这个异常类本身没有任何逻辑，只作为信号使用。网路重试的实际行为都在
+    这个异常类本身没有任何逻辑，只作为标记使用。网路重试的实际行为都在
     `_call_with_network_retry` 内部实现。"""
+
+
+class TransientAccessError(Exception):
+    """用于表示需要退避重试的临时访问失败（断网、封禁等）。"""
+
+    def __init__(self, detail=None):
+        super().__init__(detail)
+        self.detail = detail
 
 CSV_PATH = os.path.join(os.path.dirname(__file__), 'batch_metrics.csv')
 
 # === 批量爬取的配置 ===
 DEFAULT_BATCH_SIZE = 1000  # 批量处理的词语数量
-DEFAULT_REQUEST_DELAY = 1.0  # 词语详情请求的固定延迟
-DEFAULT_SEARCH_DELAY = 0.5   # 搜索词语 URL 的固定延迟
+DEFAULT_REQUEST_DELAY = 0.0  # 词语详情请求的固定延迟
+DEFAULT_SEARCH_DELAY = 0.0   # 搜索词语 URL 的固定延迟
 DEFAULT_JITTER_MAX = 0.8     # 每次请求的最大随机抖动秒数
 PENDING_PATH = os.path.join(os.path.dirname(__file__), 'pending.json')
-DB_BATCH_SIZE = 50
-DB_FLUSH_INTERVAL = 3.0
-MAX_BLOCK_RETRIES = 1
-BLOCK_BACKOFF_BASE = 60
-BLOCK_BACKOFF_MAX = 3600
-DEFAULT_GRACEFUL_SHUTDOWN_WAIT = 3.0
+DB_BATCH_SIZE = 50 # 每次写入数据库的批量大小
+DB_FLUSH_INTERVAL = 3.0 # 数据库写入缓冲区最大等待秒数
+DEFAULT_GRACEFUL_SHUTDOWN_WAIT = 3.0 # Ctrl+C 后等待写库的秒数（可调整）
 # ==========================================
 
 
+def _compute_backoff_delay(attempt):
+    try:
+        return min(RETRY_BACKOFF_BASE * (2 ** attempt), RETRY_BACKOFF_MAX)
+    except OverflowError:
+        return RETRY_BACKOFF_MAX
+
+
+def _retry_with_backoff(action, label):
+    attempt = 0
+    waited_max_delay = False
+    while True:
+        try:
+            return action()
+        except TransientAccessError as exc:
+            detail_suffix = f" ({exc.detail})" if exc.detail else ""
+            delay = _compute_backoff_delay(attempt)
+            msg = f"检测到{label}{detail_suffix}, 第 {attempt+1} 次重试，等待 {delay}s..."
+            if delay >= RETRY_BACKOFF_MAX:
+                if waited_max_delay:
+                    print(f"{msg} 已达到最大退避，停止重试。")
+                    raise
+                waited_max_delay = True
+            print(msg)
+            time.sleep(delay)
+            attempt += 1
+
+
 def read_total_processed_from_csv():
+    """从 CSV 文件读取已处理的最大 end 值，用于续爬。"""
     try:
         if not os.path.exists(CSV_PATH):
             return 0
@@ -76,6 +109,7 @@ def read_total_processed_from_csv():
 def run_batch(batch_idx, words, request_delay=DEFAULT_REQUEST_DELAY, search_delay=DEFAULT_SEARCH_DELAY,
               jitter_max=DEFAULT_JITTER_MAX, db_batch_size=DB_BATCH_SIZE,
               graceful_wait_seconds=DEFAULT_GRACEFUL_SHUTDOWN_WAIT, processed_offset_start=0):
+    """单线程抓取 + 后台批量写入（生产者-消费者），支持随机抖动与断点续爬。"""
     start_time = time.perf_counter()
     processed = 0
     success = 0
@@ -110,22 +144,20 @@ def run_batch(batch_idx, words, request_delay=DEFAULT_REQUEST_DELAY, search_dela
     writer_stop = threading.Event()
     writer_stats = {'success': 0, 'fail': 0}
     lock = threading.Lock()
-    network_retry_attempts = 0
 
     def _call_with_network_retry(func, *args, **kwargs):
-        nonlocal network_retry_attempts
-        while True:
+        """包装函数，遇到网络异常时等待后重试，超过限制则抛出 NetworkOutageError。"""
+        def action():
             try:
-                result = func(*args, **kwargs)
-                network_retry_attempts = 0
-                return result
+                return func(*args, **kwargs)
             except requests.RequestException as exc:
-                if network_retry_attempts >= NETWORK_RETRY_LIMIT:
-                    print('网络异常持续存在，已达到重试上限，终止本批次。')
-                    raise NetworkOutageError from exc
-                print(f'检测到网络异常，等待 {NETWORK_RETRY_DELAY} 秒后再试一次...')
-                network_retry_attempts += 1
-                time.sleep(NETWORK_RETRY_DELAY)
+                raise TransientAccessError(str(exc)) from exc
+
+        try:
+            return _retry_with_backoff(action, '网络异常')
+        except TransientAccessError as exc:
+            print('网络异常持续存在，已达到最大退避时长，终止本批次。')
+            raise NetworkOutageError from exc
 
     def persist_pending(word):
         try:
@@ -189,18 +221,37 @@ def run_batch(batch_idx, words, request_delay=DEFAULT_REQUEST_DELAY, search_dela
             nonlocal processed
             processed += 1
 
+        def _resolve_search_url():
+            url = _call_with_network_retry(get_ciyu_url, word, delay=search_delay)
+            if isinstance(url, dict) and url.get('blocked'):
+                raise TransientAccessError(f"status={url.get('blocked')}")
+            return url
+
+        def _fetch_detail():
+            data = _call_with_network_retry(extract_ciyu_details_from_url, url, delay=request_delay)
+            if isinstance(data, dict) and (data.get('error') in ('blocked',) or (data.get('status') in (429, 403, 503))):
+                blocked_status = data.get('status')
+                if not blocked_status and data.get('error') == 'blocked':
+                    blocked_status = 'blocked'
+                raise TransientAccessError(f"status={blocked_status}")
+            return data
+
         try:
             time.sleep(random.uniform(0, jitter_max))
-            url = _call_with_network_retry(get_ciyu_url, word, delay=search_delay)
-            if not url:
-                missing_detail_pages += 1
+            url = _retry_with_backoff(_resolve_search_url, '限流/封禁 (搜索)')
+            if isinstance(url, dict) and url.get('error'):
                 fail += 1
-                errors.append((word, 'no_url'))
+                errors.append((word, url.get('error')))
+                mark_processed()
+                return True
+
+            if url is None:
+                missing_detail_pages += 1
                 mark_processed()
                 return True
 
             time.sleep(random.uniform(0, jitter_max))
-            data = _call_with_network_retry(extract_ciyu_details_from_url, url, delay=request_delay)
+            data = _retry_with_backoff(_fetch_detail, '限流/封禁 (详情页)')
             if isinstance(data, dict) and 'error' in data:
                 fail += 1
                 errors.append((word, data.get('error')))
@@ -253,7 +304,7 @@ def run_batch(batch_idx, words, request_delay=DEFAULT_REQUEST_DELAY, search_dela
             chunk_processed += 1
         return True
 
-    pending_completed = False
+    pending_completed = False # 是否已完成 pending 列表的处理
     try:
         pending_completed = _process_pending_words()
         if pending_completed and not was_interrupted:
@@ -357,12 +408,7 @@ def main(batch_size=100, request_delay=DEFAULT_REQUEST_DELAY, search_delay=DEFAU
 
 
 if __name__ == '__main__':
-    exit(main(batch_size=DEFAULT_BATCH_SIZE,
-              request_delay=DEFAULT_REQUEST_DELAY,
-              search_delay=DEFAULT_SEARCH_DELAY))
-
-
-if __name__ == '__main__':
+    # 直接使用文件顶部的默认常量，运行前可手动修改
     exit(main(batch_size=DEFAULT_BATCH_SIZE,
               request_delay=DEFAULT_REQUEST_DELAY,
               search_delay=DEFAULT_SEARCH_DELAY))
