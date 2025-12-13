@@ -9,7 +9,7 @@
 """
 
 import traceback
-from ciyu_mysql import get_database_connection
+from ciyu_DB import get_database_connection
 
 
 CREATE_BASE_SQL = """

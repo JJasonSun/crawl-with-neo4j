@@ -88,9 +88,9 @@ def main():
     print()
     
     # 修复ciyu目录的CSV
-    # ciyu_csv = os.path.join(os.path.dirname(__file__), 'ciyu', 'batch_metrics.csv')
-    # print(f"正在检查: {ciyu_csv}")
-    # fix_csv_columns(ciyu_csv, default_value='completed')
+    ciyu_csv = os.path.join(os.path.dirname(__file__), 'ciyu', 'batch_metrics.csv')
+    print(f"正在修复: {ciyu_csv}")
+    fix_csv_columns(ciyu_csv, default_value='completed')
     
     print("\n修复完成！现在可以正常使用断点续爬功能了。")
 

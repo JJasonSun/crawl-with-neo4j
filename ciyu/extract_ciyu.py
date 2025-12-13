@@ -2,14 +2,34 @@
 """爬取汉语国学网站的词语（词典）信息。"""
 
 import json
+import os
 import time
 import urllib.parse
 from typing import Dict, List, Optional
 
 import requests
 from bs4 import BeautifulSoup, Tag
-from ciyu_mysql import get_database_connection, TEST_MODE, save_ciyu_to_db
-from ciyu_neo4j import get_words_from_neo4j
+from common.crawl_runner import CrawlerConfig, run_crawl_main
+from ciyu_DB import TEST_MODE, get_database_connection, save_ciyu_to_db, get_word_list
+
+# 默认批处理大小：每次处理的词语数量
+DEFAULT_BATCH_SIZE = 1000
+# 默认请求延迟：每个详情页请求之间的延迟（秒）
+DEFAULT_REQUEST_DELAY = 0.0
+# 默认搜索延迟：每个搜索请求之间的延迟（秒）
+DEFAULT_SEARCH_DELAY = 0.0
+# 最大随机抖动：为避免请求模式被识别，添加的随机延迟上限（秒）
+DEFAULT_JITTER_MAX = 0.8
+# 优雅关闭等待时间：收到中断信号后等待正在进行的请求完成的时间（秒）
+DEFAULT_GRACEFUL_SHUTDOWN_WAIT = 3.0
+# 数据库批处理大小：批量写入数据库的记录数
+DB_BATCH_SIZE = 50
+# 数据库刷新间隔：批量写入数据库的时间间隔（秒）
+DB_FLUSH_INTERVAL = 3.0
+# 重试退避基数：失败重试的基础延迟时间（秒）
+RETRY_BACKOFF_BASE = 300
+# 重试退避上限：失败重试的最大延迟时间（秒）
+RETRY_BACKOFF_MAX = 15
 
 
 # ========================
@@ -159,3 +179,34 @@ def extract_ciyu_details_from_url(url: str, delay: float = 1.0) -> Dict:
         raise
     except Exception as exc:  # noqa: BLE001
         return {"url": url, "error": f"处理失败: {exc}"}
+
+
+# ========================
+# 通用爬取配置入口
+# ========================
+def build_crawler_config() -> CrawlerConfig:
+    base_dir = os.path.dirname(__file__)
+
+    return CrawlerConfig(
+        name="词语",
+        base_dir=base_dir,
+        get_items=get_word_list,
+        search_func=lambda wd, delay, session=None: get_ciyu_url(wd, delay=delay),
+        detail_func=lambda url, delay, session=None: extract_ciyu_details_from_url(url, delay=delay),
+        save_func=save_ciyu_to_db,
+        label_key="word",
+        db_batch_size=DB_BATCH_SIZE,
+        db_flush_interval=DB_FLUSH_INTERVAL,
+        default_batch_size=DEFAULT_BATCH_SIZE,
+        default_request_delay=DEFAULT_REQUEST_DELAY,
+        default_search_delay=DEFAULT_SEARCH_DELAY,
+        default_jitter_max=DEFAULT_JITTER_MAX,
+        default_graceful_wait=DEFAULT_GRACEFUL_SHUTDOWN_WAIT,
+        retry_backoff_base=RETRY_BACKOFF_BASE,
+        retry_backoff_max=RETRY_BACKOFF_MAX,
+    )
+
+
+if __name__ == "__main__":
+    cfg = build_crawler_config()
+    exit(run_crawl_main(cfg))
