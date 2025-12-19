@@ -3,7 +3,6 @@
 数据库操作抽象基类
 提供通用的数据库连接和操作方法，减少重复代码。
 """
-import json
 from abc import ABC, abstractmethod
 from typing import Dict, Any, List, Optional
 
