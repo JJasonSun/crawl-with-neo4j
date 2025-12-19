@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 """爬取汉语国学网站的词语（词典）信息。"""
 
-import json
 import os
 import time
 import urllib.parse
@@ -10,7 +9,7 @@ from typing import Dict, List, Optional
 import requests
 from bs4 import BeautifulSoup, Tag
 from common.crawl_runner import CrawlerConfig, run_crawl_main
-from ciyu_DB import TEST_MODE, get_database_connection, save_ciyu_to_db, get_word_list
+from ciyu_DB import save_ciyu_to_db, get_word_list
 
 # 默认批处理大小：每次处理的词语数量
 DEFAULT_BATCH_SIZE = 1000
